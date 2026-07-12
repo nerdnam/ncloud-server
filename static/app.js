@@ -97,7 +97,21 @@ async function showApp(user) {
   } catch {
     // 저장소 목록을 못 불러와도 홈은 쓸 수 있게 한다
   }
+  loadUsage();
   loadDir(target && spacesById[target.space] ? target.path : "", { push: false });
+}
+
+async function loadUsage() {
+  try {
+    const u = await api("/api/files/usage");
+    const badge = $("usage-badge");
+    badge.textContent = u.quota_bytes
+      ? `${formatSize(u.usage_bytes)} / ${formatSize(u.quota_bytes)}`
+      : `${formatSize(u.usage_bytes)} 사용`;
+    badge.classList.remove("hidden");
+  } catch {
+    // 사용량 표시는 실패해도 무시
+  }
 }
 
 /* ---------- 브라우저 히스토리 (뒤로가기 = 이전 폴더) ---------- */
@@ -394,6 +408,7 @@ async function deleteEntry(entry) {
   try {
     await postJSON("/api/files/delete", { path: entry.path, space: currentSpace });
     loadDir(currentPath);
+    loadUsage();
   } catch (err) { alert(err.message); }
 }
 
@@ -418,6 +433,7 @@ async function uploadFiles(fileList) {
   try {
     await api(fileUrl("upload", currentPath), { method: "POST", body: form });
     loadDir(currentPath);
+    loadUsage();
   } catch (err) {
     alert(err.message);
   } finally {

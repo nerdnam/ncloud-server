@@ -354,6 +354,56 @@ def rename(body: RenameBody, user: dict = Depends(current_user)):
     return {"ok": True}
 
 
+class MoveBody(BaseModel):
+    src: str
+    dst: str
+    space: str = HOME_SPACE
+
+
+# 모든 이동을 직렬화해, "대상 존재 확인 → 이동" 사이의 경쟁으로 파일이 조용히
+# 덮어써지는 것을 막는다 (공유 마운트라 사용자별 잠금으로는 부족해 전역 잠금 사용).
+# 이동은 대부분 즉시 끝나는 메타데이터 연산이라 전역 직렬화 비용이 미미하다.
+_move_lock = asyncio.Lock()
+
+
+@router.post("/move")
+async def move(body: MoveBody, user: dict = Depends(current_user)):
+    """같은 저장소 안에서 파일/폴더를 다른 위치로 이동한다 (폴더 간 이동 포함)."""
+    root = space_root(user, body.space)
+    src = safe_path(user, body.src, body.space)
+    dst = safe_path(user, body.dst, body.space)
+    if src == root:
+        raise HTTPException(400, "루트 폴더는 이동할 수 없습니다")
+    if not src.exists():
+        raise HTTPException(404, "대상을 찾을 수 없습니다")
+    if dst == root:
+        raise HTTPException(400, "잘못된 대상 경로입니다")
+    # 폴더를 자기 자신 또는 자기 하위로 이동하는 것을 막는다
+    if src.is_dir() and (dst == src or src in dst.parents):
+        raise HTTPException(400, "폴더를 자기 하위로 이동할 수 없습니다")
+
+    def _do_move():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        # shutil.move는 같은 파일시스템이면 원자적 rename, 아니면 복사+삭제로 폴백
+        shutil.move(str(src), str(dst))
+
+    async with _move_lock:
+        if dst.exists():  # 잠금 안에서 다시 확인 → 이 확인과 이동 사이에 경쟁 없음
+            raise HTTPException(409, "이미 존재하는 이름입니다")
+        try:
+            await run_in_threadpool(_do_move)
+        except OSError as exc:
+            raise _fs_error(exc)
+    return {"ok": True, "path": dst.relative_to(root).as_posix()}
+
+
+@router.get("/usage")
+async def usage(user: dict = Depends(current_user)):
+    """로그인한 사용자의 개인 저장소 사용량과 용량 제한 (여유 공간 표시용)."""
+    used = await run_in_threadpool(dir_size, user_root(user))
+    return {"usage_bytes": used, "quota_bytes": user_quota(user["id"])}
+
+
 def _serve_file(path: Path, download: bool) -> FileResponse:
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     disposition = "attachment" if download else "inline"

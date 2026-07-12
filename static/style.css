@@ -86,6 +86,14 @@ header {
 .brand { font-size: 19px; font-weight: 700; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
 #whoami { color: var(--muted); font-size: 14px; }
+#usage-badge {
+  font-size: 12px;
+  color: var(--muted);
+  background: #f0f2f6;
+  padding: 4px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
 
 /* ---------- 레이아웃 (사이드바 + 콘텐츠) ---------- */
 .layout {

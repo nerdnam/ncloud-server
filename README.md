@@ -171,7 +171,7 @@ macOS의 File Provider 앱처럼, ncloud를 Finder에서 다른 클라우드 서
 | GET | `/delta?space=&cursor=` | 커서 이후 생성·수정된 항목만 |
 | POST | `/put?space=&path=` | 정확한 경로에 파일 생성/덮어쓰기 (본문 = 파일 내용) |
 
-읽기는 기존 `GET /api/files/download`, 폴더/삭제는 `/api/files/mkdir`·`delete`를 그대로 사용합니다.
+읽기는 기존 `GET /api/files/download`, 폴더 생성·삭제는 `/api/files/mkdir`·`delete`, 이동(폴더 간)은 `/api/files/move`를 사용합니다. 앱이 여유 공간을 표시할 때는 `GET /api/files/usage`로 개인 저장소 사용량·용량을 조회합니다.
 
 **동작 방식**
 
@@ -308,6 +308,8 @@ data/
 | GET | `/thumb?space=&path=` | 이미지 썸네일 (WebP 256px, 캐시) |
 | POST | `/upload?space=&path=` | 파일 업로드 (multipart, 다중) |
 | POST | `/mkdir` `/rename` `/delete` | 폴더 생성 / 이름 변경 / 삭제 |
+| POST | `/move` | 파일·폴더를 다른 위치로 이동 (폴더 간 이동) |
+| GET | `/usage` | 로그인 사용자의 개인 저장소 사용량·용량 제한 |
 
 ### 관리자 `/api/admin` (관리자 세션 필요)
 
