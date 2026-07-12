@@ -8,6 +8,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# 기본 urllib UA(Python-urllib/x)는 Cloudflare 등 WAF가 봇으로 보고 차단(error 1010)한다.
+# 브라우저 형태 + 앱 식별자를 함께 보내 정상 클라이언트로 인식되게 한다.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) ncloud-sync/0.1.0"
+)
+
 
 class AuthError(Exception):
     """세션 만료·인증 실패 (재로그인 필요)."""
@@ -18,6 +25,20 @@ class ApiError(Exception):
         super().__init__(f"[{status}] {message}")
         self.status = status
         self.message = message
+
+
+def _blocked_by_cloudflare(status: int, body: str) -> str | None:
+    """Cloudflare/WAF 차단이면 사용자에게 도움이 되는 안내 메시지를 만든다."""
+    low = body.lower()
+    if "error code: 1010" in low or "cloudflare" in low and ("cf-ray" in low or "attention required" in low):
+        return (
+            "Cloudflare가 이 연결을 차단했습니다 (error 1010).\n\n"
+            "서버 앞단의 Cloudflare가 이 앱을 봇으로 보고 막은 것입니다. "
+            "서버 관리자가 Cloudflare에서 다음 중 하나를 설정해야 합니다:\n"
+            " · Bot Fight Mode를 끄거나\n"
+            " · /api/* 와 /dav/* 경로에 WAF 예외(Skip) 규칙을 추가"
+        )
+    return None
 
 
 class NCloudClient:
@@ -32,7 +53,7 @@ class NCloudClient:
         url = self.base_url + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        headers = {}
+        headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
         body = data
@@ -46,9 +67,13 @@ class NCloudClient:
             resp = urllib.request.urlopen(req, timeout=self.timeout)
             return resp
         except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")
+            raw = e.read().decode("utf-8", "replace")
+            cf = _blocked_by_cloudflare(e.code, raw)
+            if cf:
+                raise ApiError(e.code, cf)
+            detail = raw
             try:
-                detail = json.loads(detail).get("detail", detail)
+                detail = json.loads(raw).get("detail", raw)
             except Exception:
                 pass
             if e.code == 401:
@@ -66,17 +91,25 @@ class NCloudClient:
         url = self.base_url + "/api/auth/login"
         body = json.dumps({"username": username, "password": password}).encode()
         req = urllib.request.Request(
-            url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json",
+                     "User-Agent": USER_AGENT, "Accept": "*/*"},
         )
         try:
             resp = urllib.request.urlopen(req, timeout=self.timeout)
         except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")
+            raw = e.read().decode("utf-8", "replace")
+            cf = _blocked_by_cloudflare(e.code, raw)
+            if cf:
+                raise AuthError(cf)
+            detail = raw
             try:
-                detail = json.loads(detail).get("detail", detail)
+                detail = json.loads(raw).get("detail", raw)
             except Exception:
                 pass
             raise AuthError(detail)
+        except urllib.error.URLError as e:
+            raise AuthError(f"서버에 연결할 수 없습니다: {e.reason}")
         # Set-Cookie: ncloud_session=<token>; ... 에서 토큰 추출
         token = None
         for key, value in resp.getheaders():
