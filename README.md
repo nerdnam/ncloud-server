@@ -13,9 +13,22 @@
 
 ## 실행 (Docker Compose)
 
+ghcr.io에 올라간 이미지를 받아 바로 실행:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+또는 로컬에서 직접 빌드:
+
 ```bash
 docker compose up -d --build
 ```
+
+이미지는 main 브랜치에 push될 때마다 GitHub Actions가 자동으로 빌드해
+`ghcr.io/nerdnam/ncloud-server:latest`(amd64/arm64)로 올립니다.
+서버 업데이트는 `docker compose pull && docker compose up -d` 한 줄이면 됩니다.
 
 브라우저에서 http://localhost:8000 접속 → 첫 실행이면 관리자 계정을 만들고 시작합니다.
 

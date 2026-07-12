@@ -1,6 +1,8 @@
 services:
   ncloud:
-    image: nerdnam/ncloud-server:0.0.1
+    # GitHub Actions가 main 푸시마다 자동 빌드해 올리는 이미지.
+    # 로컬에서 직접 빌드하려면 `docker compose build` (build: . 사용)
+    image: ghcr.io/nerdnam/ncloud-server:latest
     build: .
     container_name: ncloud-server
     ports:
