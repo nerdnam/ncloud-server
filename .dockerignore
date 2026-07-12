@@ -1,0 +1,10 @@
+data/
+mounts/
+.claude/
+__pycache__/
+*.pyc
+README.md
+start.bat
+compose.yaml
+Dockerfile
+.dockerignore

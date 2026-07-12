@@ -1,0 +1,4 @@
+# 셸 스크립트는 리눅스 서버에서 실행되므로 항상 LF 유지
+*.sh text eol=lf
+Dockerfile text eol=lf
+compose.yaml text eol=lf

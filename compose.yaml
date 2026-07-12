@@ -1,0 +1,24 @@
+services:
+  ncloud:
+    image: nerdnam/ncloud-server:0.0.1
+    build: .
+    container_name: ncloud-server
+    ports:
+      - "8000:8000"
+    volumes:
+      # 계정 DB·업로드 파일·썸네일이 모두 여기 저장됩니다 (컨테이너를 지워도 유지)
+      - /mnt/Data0/ncloud/data:/app/data
+      # ── 외부 저장소 ──────────────────────────────────────────────
+      # /app/mounts/<이름> 으로 마운트한 폴더는 웹 UI 사이드바에
+      # "<이름>" 저장소로 나타나 탐색·업로드·미리보기가 가능합니다.
+      # 읽기 전용으로 연결하려면 끝에 :ro 를 붙이세요 (UI에 🔒 표시).
+      # 예시 (원하는 대로 수정/추가):
+      # - /mnt/Data0/Media:/app/mounts/media
+      # - /mnt/Data0/Backup:/app/mounts/backup:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/auth/status')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

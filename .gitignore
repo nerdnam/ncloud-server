@@ -1,0 +1,14 @@
+# 런타임 데이터 (계정 DB, 업로드 파일, 썸네일)
+data/
+
+# 로컬 테스트용 외부 저장소 마운트
+mounts/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 로컬 도구 설정
+.claude/

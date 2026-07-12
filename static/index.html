@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ncloud</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☁️</text></svg>">
+</head>
+<body>
+
+<!-- 로그인 / 초기 설정 화면 -->
+<div id="auth-screen" class="hidden">
+  <div class="auth-card">
+    <h1>☁️ ncloud</h1>
+    <p id="auth-subtitle">로그인</p>
+    <form id="auth-form">
+      <input type="text" id="auth-username" placeholder="아이디" autocomplete="username" required>
+      <input type="password" id="auth-password" placeholder="비밀번호" autocomplete="current-password" required>
+      <button type="submit" id="auth-submit">로그인</button>
+    </form>
+    <p id="auth-error" class="auth-error"></p>
+  </div>
+</div>
+
+<!-- 메인 파일 브라우저 -->
+<div id="app-screen" class="hidden">
+  <header>
+    <div class="brand">☁️ ncloud</div>
+    <div class="header-actions">
+      <span id="whoami"></span>
+      <button id="admin-btn" class="btn subtle hidden">👥 사용자 관리</button>
+      <button id="pw-btn" class="btn subtle">🔑 비밀번호 변경</button>
+      <button id="logout-btn" class="btn subtle">로그아웃</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside id="sidebar">
+      <div class="side-title">저장소</div>
+      <nav id="space-list"></nav>
+      <p class="side-hint">외부 폴더는 docker 볼륨을<br><code>/app/mounts/이름</code>에<br>마운트하면 나타납니다</p>
+    </aside>
+
+    <section class="content">
+      <div class="toolbar">
+        <nav id="breadcrumb"></nav>
+        <div class="toolbar-actions">
+          <span id="readonly-badge" class="hidden">🔒 읽기 전용</span>
+          <div class="view-toggle" role="group" aria-label="보기 방식">
+            <button id="view-grid" title="그리드 보기">▦</button>
+            <button id="view-compact" title="촘촘히 보기">▩</button>
+            <button id="view-list" title="목록 보기">☰</button>
+          </div>
+          <button id="mkdir-btn" class="btn">＋ 새 폴더</button>
+          <button id="upload-btn" class="btn primary">⬆ 업로드</button>
+          <input type="file" id="file-input" multiple hidden>
+        </div>
+      </div>
+
+      <div id="drop-hint">여기에 파일을 놓으면 업로드됩니다</div>
+      <div id="upload-status" class="hidden"></div>
+
+      <main id="file-list"></main>
+      <div id="empty-hint" class="hidden">폴더가 비어 있습니다</div>
+    </section>
+  </div>
+</div>
+
+<!-- 비밀번호 변경 모달 -->
+<div id="pw-modal" class="modal hidden">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card">
+    <h2>🔑 비밀번호 변경</h2>
+    <form id="pw-form">
+      <input type="password" id="pw-current" placeholder="현재 비밀번호" autocomplete="current-password" required>
+      <input type="password" id="pw-new" placeholder="새 비밀번호 (4자 이상)" autocomplete="new-password" required>
+      <input type="password" id="pw-new2" placeholder="새 비밀번호 확인" autocomplete="new-password" required>
+      <p id="pw-error" class="auth-error"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>취소</button>
+        <button type="submit" class="btn primary">변경</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- 사용자 관리 모달 (관리자 전용) -->
+<div id="admin-modal" class="modal hidden">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card wide">
+    <h2>👥 사용자 관리</h2>
+    <div class="table-wrap">
+      <table id="user-table">
+        <thead>
+          <tr><th>아이디</th><th>권한</th><th>가입일</th><th>사용량</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <h3>새 사용자 추가</h3>
+    <form id="add-user-form">
+      <input type="text" id="new-username" placeholder="아이디" autocomplete="off" required>
+      <input type="password" id="new-password" placeholder="비밀번호 (4자 이상)" autocomplete="new-password" required>
+      <label class="check-label"><input type="checkbox" id="new-is-admin"> 관리자</label>
+      <button type="submit" class="btn primary">추가</button>
+    </form>
+    <p id="admin-error" class="auth-error"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- 미리보기 모달 -->
+<div id="preview-modal" class="hidden">
+  <div class="preview-backdrop"></div>
+  <div class="preview-body">
+    <div class="preview-top">
+      <span id="preview-name"></span>
+      <div>
+        <a id="preview-download" class="btn subtle" href="#">다운로드</a>
+        <button id="preview-close" class="btn subtle">✕ 닫기</button>
+      </div>
+    </div>
+    <div id="preview-content"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
