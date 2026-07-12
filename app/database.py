@@ -37,7 +37,14 @@ def init_db() -> None:
                 password_hash TEXT NOT NULL,
                 salt TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                quota_bytes INTEGER NOT NULL DEFAULT 0,  -- 0 = 무제한, 개인 저장소에만 적용
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS mount_grants (
+                -- 일반 사용자가 접근 가능한 외부 마운트 (관리자는 항상 전체 접근)
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                mount_name TEXT NOT NULL,
+                PRIMARY KEY (user_id, mount_name)
             );
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
@@ -58,11 +65,15 @@ def init_db() -> None:
             );
             """
         )
-        # 구버전 DB 마이그레이션: is_admin 컬럼이 없으면 추가하고 첫 사용자를 관리자로 승격
+        # 구버전 DB 마이그레이션: 누락된 컬럼 추가, 첫 사용자를 관리자로 승격
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
         if "is_admin" not in cols:
             conn.execute(
                 "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+            )
+        if "quota_bytes" not in cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN quota_bytes INTEGER NOT NULL DEFAULT 0"
             )
         no_admin = (
             conn.execute("SELECT COUNT(*) AS n FROM users WHERE is_admin = 1").fetchone()["n"] == 0

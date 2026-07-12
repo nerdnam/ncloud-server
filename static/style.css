@@ -371,6 +371,15 @@ body.dragging #drop-hint { display: block; }
   flex: 1; min-width: 130px; margin-bottom: 0;
 }
 .check-label { font-size: 13px; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.mount-check {
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+.mount-check:hover { background: #eef1f6; }
+#mounts-list { margin: 6px 0 4px; max-height: 300px; overflow-y: auto; }
 
 .table-wrap { overflow-x: auto; }
 #user-table { width: 100%; border-collapse: collapse; font-size: 13px; }

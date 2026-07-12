@@ -4,6 +4,8 @@ Every endpoint takes a "space": "home" is the user's private storage
 (data/files/<username>); any other value is an external mount — a directory
 that appears under MOUNTS_DIR (in Docker: -v /host/path:/app/mounts/<name>).
 """
+import asyncio
+import contextlib
 import errno
 import hashlib
 import io
@@ -16,10 +18,11 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from .auth import current_user
-from .database import FILES_DIR, MOUNTS_DIR, THUMBS_DIR
+from .database import FILES_DIR, MOUNTS_DIR, THUMBS_DIR, get_db
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -51,6 +54,47 @@ def list_mounts() -> list[Path]:
     )
 
 
+def dir_size(path: Path) -> int:
+    """디렉토리 안 모든 파일의 총 바이트 수 (심볼릭 링크는 따라가지 않음)."""
+    total = 0
+    for root, _dirs, files in os.walk(path, onerror=lambda e: None):
+        for name in files:
+            fp = os.path.join(root, name)
+            if os.path.islink(fp):
+                continue
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total
+
+
+def granted_mounts(user_id: int) -> set[str]:
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT mount_name FROM mount_grants WHERE user_id = ?", (user_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r["mount_name"] for r in rows}
+
+
+def accessible_mounts(user: dict) -> list[Path]:
+    """관리자는 모든 마운트, 일반 사용자는 부여받은 마운트만."""
+    mounts = list_mounts()
+    if user["is_admin"]:
+        return mounts
+    allowed = granted_mounts(user["id"])
+    return [m for m in mounts if m.name in allowed]
+
+
+def _can_access_mount(user: dict, name: str) -> bool:
+    if user["is_admin"]:
+        return True
+    return name in granted_mounts(user["id"])
+
+
 def space_root(user: dict, space: str) -> Path:
     if space in ("", HOME_SPACE):
         return user_root(user).resolve()
@@ -60,6 +104,9 @@ def space_root(user: dict, space: str) -> Path:
         raise HTTPException(404, "저장소를 찾을 수 없습니다")
     candidate = MOUNTS_DIR / space
     if not candidate.is_dir():
+        raise HTTPException(404, "저장소를 찾을 수 없습니다")
+    # 권한 없는 사용자에게는 저장소 존재 자체를 숨긴다 (404)
+    if not _can_access_mount(user, space):
         raise HTTPException(404, "저장소를 찾을 수 없습니다")
     return candidate.resolve()
 
@@ -116,7 +163,7 @@ def _fs_error(exc: OSError) -> HTTPException:
 @router.get("/spaces")
 def spaces(user: dict = Depends(current_user)):
     result = [{"id": HOME_SPACE, "name": "내 파일", "readonly": False}]
-    for mount in list_mounts():
+    for mount in accessible_mounts(user):
         result.append(
             {"id": mount.name, "name": mount.name, "readonly": not _writable(mount)}
         )
@@ -147,6 +194,30 @@ def list_dir(path: str = "", space: str = HOME_SPACE, user: dict = Depends(curre
     }
 
 
+def user_quota(user_id: int) -> int:
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT quota_bytes FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["quota_bytes"] if row else 0
+
+
+# 사용자별 업로드 잠금: 같은 사용자의 동시 업로드가 용량 검사를 직렬화하도록 해
+# 스냅샷 경쟁(TOCTOU)으로 용량 제한을 우회하는 것을 막는다 (용량 제한이 있을 때만 사용)
+_upload_locks: dict[int, asyncio.Lock] = {}
+
+
+def _upload_lock(user_id: int) -> asyncio.Lock:
+    lock = _upload_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _upload_locks[user_id] = lock
+    return lock
+
+
 @router.post("/upload")
 async def upload(
     files: list[UploadFile],
@@ -157,24 +228,62 @@ async def upload(
     target_dir = safe_path(user, path, space)
     if not target_dir.is_dir():
         raise HTTPException(404, "폴더를 찾을 수 없습니다")
-    saved = []
-    for f in files:
-        name = Path(f.filename or "unnamed").name  # strip any client-sent directories
-        if not name or name in (".", ".."):
-            continue
-        dest = target_dir / name
-        # avoid overwriting: append (1), (2), ...
-        counter = 1
-        while dest.exists():
-            dest = target_dir / f"{Path(name).stem} ({counter}){Path(name).suffix}"
-            counter += 1
-        try:
-            with dest.open("wb") as out:
-                shutil.copyfileobj(f.file, out)
-        except OSError as exc:
-            raise _fs_error(exc)
-        saved.append(dest.name)
+
+    # 용량 제한은 개인 저장소(home)에만 적용 (외부 마운트는 공유 저장소)
+    is_home = space in ("", HOME_SPACE)
+    quota = user_quota(user["id"]) if is_home else 0
+
+    # 용량 제한이 있으면 사용자별 잠금으로 검사+쓰기를 직렬화 (동시 업로드 우회 방지)
+    guard = _upload_lock(user["id"]) if quota > 0 else contextlib.nullcontext()
+    async with guard:
+        # dir_size는 트리 전체를 훑으므로 이벤트 루프를 막지 않도록 스레드풀에서 실행
+        used = await run_in_threadpool(dir_size, user_root(user)) if quota > 0 else 0
+
+        saved = []
+        for f in files:
+            name = Path(f.filename or "unnamed").name  # strip any client-sent dirs
+            if not name or name in (".", ".."):
+                continue
+            dest = target_dir / name
+            # avoid overwriting: append (1), (2), ...
+            counter = 1
+            while dest.exists():
+                dest = target_dir / f"{Path(name).stem} ({counter}){Path(name).suffix}"
+                counter += 1
+            try:
+                # 스트리밍으로 저장하면서 실시간으로 용량 제한을 확인한다
+                written = 0
+                with dest.open("wb") as out:
+                    while True:
+                        chunk = await f.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        if quota > 0 and used + written + len(chunk) > quota:
+                            out.close()
+                            dest.unlink(missing_ok=True)
+                            raise HTTPException(
+                                413,
+                                f"용량 제한({_fmt_size(quota)})을 초과했습니다. "
+                                f"'{name}'을(를) 저장할 수 없습니다.",
+                            )
+                        out.write(chunk)
+                        written += len(chunk)
+            except OSError as exc:
+                dest.unlink(missing_ok=True)
+                raise _fs_error(exc)
+            used += written
+            saved.append(dest.name)
     return {"saved": saved}
+
+
+def _fmt_size(n: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    i = 0
+    v = float(n)
+    while v >= 1024 and i < len(units) - 1:
+        v /= 1024
+        i += 1
+    return f"{v:.0f} {units[i]}" if i == 0 else f"{v:.1f} {units[i]}"
 
 
 class PathBody(BaseModel):

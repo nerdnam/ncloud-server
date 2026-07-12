@@ -615,9 +615,12 @@ $("admin-btn").addEventListener("click", () => {
   loadUsers();
 });
 
+let availableMounts = []; // 관리자 모달에서 부여 가능한 전체 외부 저장소 이름
+
 async function loadUsers() {
   try {
     const data = await api("/api/admin/users");
+    availableMounts = data.available_mounts || [];
     $("admin-error").textContent = ""; // 이전 작업의 오류 메시지 제거
     renderUsers(data.users);
   } catch (err) {
@@ -647,18 +650,43 @@ function renderUsers(users) {
     tr.appendChild(tdDate);
 
     const tdUsage = document.createElement("td");
-    tdUsage.textContent = u.usage_bytes ? formatSize(u.usage_bytes) : "0 B";
+    const used = u.usage_bytes ? formatSize(u.usage_bytes) : "0 B";
+    tdUsage.textContent = u.quota_bytes ? `${used} / ${formatSize(u.quota_bytes)}` : `${used} / 무제한`;
     tr.appendChild(tdUsage);
+
+    const tdMounts = document.createElement("td");
+    if (u.is_admin) {
+      tdMounts.innerHTML = '<span class="me-note">전체</span>';
+    } else if (u.mounts && u.mounts.length) {
+      tdMounts.textContent = u.mounts.join(", ");
+    } else {
+      tdMounts.innerHTML = '<span class="me-note">없음</span>';
+    }
+    tr.appendChild(tdMounts);
 
     const tdActions = document.createElement("td");
     const wrap = document.createElement("div");
     wrap.className = "user-actions";
+    // 용량 제한은 관리자 자신 포함 누구에게나 설정 가능
+    const quota = document.createElement("button");
+    quota.textContent = "용량 제한";
+    quota.onclick = () => adminSetQuota(u);
+    wrap.appendChild(quota);
+
     if (u.id === currentUser.id) {
       const me = document.createElement("span");
       me.className = "me-note";
       me.textContent = "본인";
       wrap.appendChild(me);
     } else {
+      // 저장소 권한은 일반 사용자에게만 (관리자는 항상 전체 접근)
+      if (!u.is_admin) {
+        const mounts = document.createElement("button");
+        mounts.textContent = "저장소 권한";
+        mounts.onclick = () => adminSetMounts(u);
+        wrap.appendChild(mounts);
+      }
+
       const pw = document.createElement("button");
       pw.textContent = "비밀번호 재설정";
       pw.onclick = () => adminResetPassword(u);
@@ -681,6 +709,67 @@ function renderUsers(users) {
     tbody.appendChild(tr);
   }
 }
+
+async function adminSetQuota(u) {
+  const currentGB = u.quota_bytes ? (u.quota_bytes / 1024 ** 3).toFixed(2).replace(/\.?0+$/, "") : "0";
+  const input = prompt(
+    `"${u.username}"의 용량 제한 (GB, 0 = 무제한):\n※ 개인 저장소에만 적용됩니다`,
+    currentGB
+  );
+  if (input === null) return;
+  const gb = parseFloat(input);
+  if (isNaN(gb) || gb < 0) {
+    alert("0 이상의 숫자를 입력하세요");
+    return;
+  }
+  try {
+    await postJSON("/api/admin/users/quota", {
+      user_id: u.id,
+      quota_bytes: Math.round(gb * 1024 ** 3),
+    });
+    loadUsers();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+let mountsTargetId = null;
+
+function adminSetMounts(u) {
+  mountsTargetId = u.id;
+  $("mounts-error").textContent = "";
+  $("mounts-target").textContent = `"${u.username}" 사용자가 접근할 외부 저장소를 선택하세요.`;
+  const list = $("mounts-list");
+  list.innerHTML = "";
+  if (!availableMounts.length) {
+    list.innerHTML = '<p class="qr-desc">마운트된 외부 저장소가 없습니다.</p>';
+  } else {
+    const granted = new Set(u.mounts || []);
+    for (const name of availableMounts) {
+      const label = document.createElement("label");
+      label.className = "check-label mount-check";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = name;
+      cb.checked = granted.has(name);
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(" 💾 " + name));
+      list.appendChild(label);
+    }
+  }
+  $("mounts-modal").classList.remove("hidden");
+}
+
+$("mounts-save").addEventListener("click", async () => {
+  const mounts = [...document.querySelectorAll("#mounts-list input:checked")].map((c) => c.value);
+  try {
+    await postJSON("/api/admin/users/mounts", { user_id: mountsTargetId, mounts });
+    $("mounts-modal").classList.add("hidden");
+    loadUsers();
+  } catch (err) {
+    $("mounts-error").textContent = err.message;
+  }
+});
 
 async function adminResetPassword(u) {
   const pw = prompt(`"${u.username}"의 새 비밀번호 (4자 이상):`);

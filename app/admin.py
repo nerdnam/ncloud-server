@@ -1,5 +1,4 @@
 """Admin-only user management."""
-import os
 import secrets
 import shutil
 import sqlite3
@@ -10,19 +9,9 @@ from pydantic import BaseModel, Field
 
 from .auth import Credentials, hash_password, require_admin
 from .database import FILES_DIR, get_db
+from .files import dir_size, list_mounts
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-
-
-def _dir_size(path) -> int:
-    total = 0
-    for root, _dirs, files in os.walk(path, onerror=lambda e: None):
-        for name in files:
-            try:
-                total += os.path.getsize(os.path.join(root, name))
-            except OSError:
-                pass
-    return total
 
 
 @router.get("/users")
@@ -30,10 +19,14 @@ def list_users(admin: dict = Depends(require_admin)):
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT id, username, is_admin, created_at FROM users ORDER BY id"
+            "SELECT id, username, is_admin, quota_bytes, created_at FROM users ORDER BY id"
         ).fetchall()
+        grant_rows = conn.execute("SELECT user_id, mount_name FROM mount_grants").fetchall()
     finally:
         conn.close()
+    grants: dict[int, list[str]] = {}
+    for g in grant_rows:
+        grants.setdefault(g["user_id"], []).append(g["mount_name"])
     users = []
     for row in rows:
         home = FILES_DIR / row["username"]
@@ -43,10 +36,13 @@ def list_users(admin: dict = Depends(require_admin)):
                 "username": row["username"],
                 "is_admin": bool(row["is_admin"]),
                 "created_at": row["created_at"],
-                "usage_bytes": _dir_size(home) if home.is_dir() else 0,
+                "usage_bytes": dir_size(home) if home.is_dir() else 0,
+                "quota_bytes": row["quota_bytes"],
+                "mounts": sorted(grants.get(row["id"], [])),
             }
         )
-    return {"users": users}
+    # 저장소 권한 UI가 체크박스로 보여줄 전체 마운트 목록
+    return {"users": users, "available_mounts": [m.name for m in list_mounts()]}
 
 
 class NewUser(Credentials):
@@ -187,3 +183,47 @@ def set_admin(body: SetAdmin, admin: dict = Depends(require_admin)):
     finally:
         conn.close()
     return {"ok": True}
+
+
+class SetQuota(BaseModel):
+    user_id: int
+    quota_bytes: int = Field(ge=0)  # 0 = 무제한
+
+
+@router.post("/users/quota")
+def set_quota(body: SetQuota, admin: dict = Depends(require_admin)):
+    conn = get_db()
+    try:
+        _get_target(conn, body.user_id)
+        conn.execute(
+            "UPDATE users SET quota_bytes = ? WHERE id = ?",
+            (body.quota_bytes, body.user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+class SetMounts(BaseModel):
+    user_id: int
+    mounts: list[str]
+
+
+@router.post("/users/mounts")
+def set_mounts(body: SetMounts, admin: dict = Depends(require_admin)):
+    """사용자가 접근 가능한 외부 마운트 목록을 통째로 교체한다."""
+    valid = {m.name for m in list_mounts()}
+    requested = {m for m in body.mounts if m in valid}  # 존재하는 마운트만 반영
+    conn = get_db()
+    try:
+        _get_target(conn, body.user_id)
+        conn.execute("DELETE FROM mount_grants WHERE user_id = ?", (body.user_id,))
+        conn.executemany(
+            "INSERT INTO mount_grants (user_id, mount_name) VALUES (?, ?)",
+            [(body.user_id, name) for name in sorted(requested)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "mounts": sorted(requested)}

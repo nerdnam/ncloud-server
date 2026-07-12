@@ -109,7 +109,7 @@
     <div class="table-wrap">
       <table id="user-table">
         <thead>
-          <tr><th>아이디</th><th>권한</th><th>가입일</th><th>사용량</th><th></th></tr>
+          <tr><th>아이디</th><th>권한</th><th>가입일</th><th>사용량 / 제한</th><th>외부 저장소</th><th></th></tr>
         </thead>
         <tbody></tbody>
       </table>
@@ -124,6 +124,21 @@
     <p id="admin-error" class="auth-error"></p>
     <div class="modal-actions">
       <button type="button" class="btn" data-close>닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- 외부 저장소 권한 모달 (관리자 전용) -->
+<div id="mounts-modal" class="modal hidden">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card">
+    <h2>💾 외부 저장소 권한</h2>
+    <p id="mounts-target" class="qr-desc"></p>
+    <div id="mounts-list"></div>
+    <p id="mounts-error" class="auth-error"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>취소</button>
+      <button id="mounts-save" class="btn primary">저장</button>
     </div>
   </div>
 </div>
