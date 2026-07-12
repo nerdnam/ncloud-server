@@ -6,15 +6,45 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# 동시에 두 빌드가 돌며 같은 버전을 계산하지 않도록 직렬화
+concurrency:
+  group: docker-build
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write   # 자동 버전 태그 push용
       packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 버전 계산에 전체 태그 필요
+
+      # main 푸시 → 최신 v* 태그에서 패치 버전 +1 (v0.0.1 → 0.0.2)
+      # 수동 태그 푸시(v1.2.3) → 그 버전 그대로 사용
+      - name: Determine version
+        id: ver
+        run: |
+          REPO="ghcr.io/${{ github.repository }}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            CREATE_TAG=false
+            TAGS="$REPO:$VERSION,$REPO:sha-${GITHUB_SHA::7}"
+          else
+            LATEST=$(git tag -l 'v*' --sort=-v:refname | head -1)
+            LATEST=${LATEST:-v0.0.0}
+            IFS=. read -r MA MI PA <<< "${LATEST#v}"
+            VERSION="$MA.$MI.$((PA+1))"
+            CREATE_TAG=true
+            TAGS="$REPO:$VERSION,$REPO:latest,$REPO:sha-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION"      >> "$GITHUB_OUTPUT"
+          echo "create_tag=$CREATE_TAG" >> "$GITHUB_OUTPUT"
+          echo "tags=$TAGS"            >> "$GITHUB_OUTPUT"
+          echo "▶ building version $VERSION"
 
       - name: Set up QEMU (arm64 빌드용)
         uses: docker/setup-qemu-action@v3
@@ -29,24 +59,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # main 푸시 → latest + sha-XXXXXXX, v1.2.3 태그 푸시 → 1.2.3
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha
-            type=semver,pattern={{version}}
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.ver.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 빌드가 성공한 경우에만 버전 태그를 저장소에 기록
+      - name: Push version tag
+        if: steps.ver.outputs.create_tag == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.ver.outputs.version }}"
+          git push origin "v${{ steps.ver.outputs.version }}"
