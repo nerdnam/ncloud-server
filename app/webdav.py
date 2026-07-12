@@ -1,4 +1,4 @@
-"""WebDAV endpoint — mount ncloud as a native network drive (Windows/macOS/Linux).
+"""WebDAV endpoint — mount GenDisk as a native network drive (Windows/macOS/Linux).
 
 Exposed at /dav. Authenticates with HTTP Basic (username/password), the scheme
 WebDAV clients use. The first path segment is the space (`home` or an external
@@ -39,7 +39,7 @@ DAV_METHODS = [
 _UNAUTH = Response(
     "인증이 필요합니다",
     status_code=401,
-    headers={"WWW-Authenticate": 'Basic realm="ncloud WebDAV"'},
+    headers={"WWW-Authenticate": 'Basic realm="GenDisk WebDAV"'},
 )
 
 
@@ -139,7 +139,7 @@ def _handle_options() -> Response:
 
 def _propfind(user: dict, space: str | None, rel: str, depth: str) -> Response:
     if space is None:  # 가상 루트: 접근 가능한 저장소 목록
-        responses = [_prop_xml("/dav/", "ncloud", True, 0, 0, "root")]
+        responses = [_prop_xml("/dav/", "GenDisk", True, 0, 0, "root")]
         if depth != "0":
             spaces = [{"id": HOME_SPACE, "name": "내 파일"}] + [
                 {"id": m.name, "name": m.name} for m in accessible_mounts(user)]

@@ -1,4 +1,4 @@
-"""설정 저장/불러오기 (%APPDATA%\\ncloud-sync\\config.json)."""
+"""설정 저장/불러오기 (%APPDATA%\\gendisk-sync\\config.json)."""
 import json
 import os
 import tempfile
@@ -12,7 +12,7 @@ _save_lock = threading.Lock()
 
 def config_dir() -> str:
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, "ncloud-sync")
+    d = os.path.join(base, "gendisk-sync")
     os.makedirs(d, exist_ok=True)
     return d
 

@@ -71,7 +71,7 @@ def sync_etag(path: Path, stat: os.stat_result) -> str:
 @router.get("/info")
 def info(user: dict = Depends(current_user)):
     return {
-        "server": "ncloud",
+        "server": "gendisk",
         "api": "sync/v1",
         "features": ["enumerate", "delta", "put", "download"],
         "chunk_size": CHUNK,

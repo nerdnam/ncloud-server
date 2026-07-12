@@ -2,7 +2,7 @@
 import os
 import sys
 
-APP_NAME = "ncloud-sync"
+APP_NAME = "gendisk-sync"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 

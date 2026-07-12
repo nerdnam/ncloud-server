@@ -1,6 +1,6 @@
 #!/bin/bash
 
-docker stop ncloud-server
+docker stop gendisk
 
 
 # ▼▼▼ [핵심 수정] ▼▼▼
@@ -15,7 +15,7 @@ echo "Pruning Docker system..."
 docker system prune -a -f
 
 # 캐시를 사용하지 않고 새 도커 이미지를 빌드합니다.
-IMAGE=ghcr.io/nerdnam/ncloud-server
+IMAGE=ghcr.io/nerdnam/gendisk.cloud
 VERSION=0.0.1
 
 echo "Building new Docker image..."

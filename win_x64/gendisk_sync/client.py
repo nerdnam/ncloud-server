@@ -1,4 +1,4 @@
-"""ncloud 서버와 통신하는 HTTP 클라이언트 (표준 라이브러리만 사용, 외부 의존성 없음).
+"""GenDisk 서버와 통신하는 HTTP 클라이언트 (표준 라이브러리만 사용, 외부 의존성 없음).
 
 로그인은 세션 쿠키를 발급하는데, 그 쿠키 값이 곧 세션 토큰이다. 값을 추출해
 이후 요청에 Authorization: Bearer 로 실어 보낸다 (서버가 쿠키/Bearer 둘 다 허용).
@@ -12,7 +12,7 @@ import urllib.request
 # 브라우저 형태 + 앱 식별자를 함께 보내 정상 클라이언트로 인식되게 한다.
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) ncloud-sync/0.1.0"
+    "(KHTML, like Gecko) gendisk-sync/0.1.0"
 )
 
 
@@ -41,7 +41,7 @@ def _blocked_by_cloudflare(status: int, body: str) -> str | None:
     return None
 
 
-class NCloudClient:
+class GenDiskClient:
     def __init__(self, base_url: str, token: str | None = None, timeout: int = 60):
         self.base_url = base_url.rstrip("/")
         self.token = token

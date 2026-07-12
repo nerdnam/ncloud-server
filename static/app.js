@@ -1,4 +1,4 @@
-/* ncloud 프론트엔드 */
+/* GenDisk 프론트엔드 */
 const $ = (id) => document.getElementById(id);
 
 let currentPath = "";
@@ -98,7 +98,21 @@ async function showApp(user) {
     // 저장소 목록을 못 불러와도 홈은 쓸 수 있게 한다
   }
   loadUsage();
+  loadWinDownload();
   loadDir(target && spacesById[target.space] ? target.path : "", { push: false });
+}
+
+async function loadWinDownload() {
+  try {
+    const info = await api("/api/download/info");
+    if (info.windows) {
+      const a = $("win-download");
+      a.title = `${info.windows.name} (${formatSize(info.windows.size)})`;
+      a.classList.remove("hidden");
+    }
+  } catch {
+    // 다운로드 정보는 실패해도 무시
+  }
 }
 
 async function loadUsage() {

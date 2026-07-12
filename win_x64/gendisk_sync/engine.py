@@ -10,7 +10,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-STATE_DIR = ".ncsync"
+STATE_DIR = ".gendisk"
 STATE_FILE = "state.json"
 HASH_MAX = 8 * 1024 * 1024  # 서버 sync_etag와 동일 기준
 

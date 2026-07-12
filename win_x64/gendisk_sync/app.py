@@ -1,4 +1,4 @@
-"""ncloud-sync GUI: 로그인 · 폴더 동기화 · 드라이브 연결 · 시작 옵션.
+"""gendisk-sync GUI: 로그인 · 폴더 동기화 · 드라이브 연결 · 시작 옵션.
 
 tkinter(표준)로 창을 만들고 백그라운드 스레드에서 주기적으로 동기화한다.
 설정에 따라 시작 시 자동 로그인 → 드라이브 자동 연결 → 자동 동기화까지 수행한다.
@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import autostart
-from .client import ApiError, AuthError, NCloudClient
+from .client import ApiError, AuthError, GenDiskClient
 from .config import Config
 from .engine import SyncEngine
 from .webdav_mount import connect_drive, disconnect_drive
@@ -35,7 +35,7 @@ class SyncWorker(threading.Thread):
             cfg = self.app.cfg
             if cfg.enabled and cfg.is_ready():
                 try:
-                    client = NCloudClient(cfg.server_url, cfg.token)
+                    client = GenDiskClient(cfg.server_url, cfg.token)
                     engine = SyncEngine(client, cfg.space, cfg.local_folder, log=self.app.log)
                     self.app.set_status("동기화 중...")
                     summary = engine.run_once()
@@ -55,7 +55,7 @@ class App:
     def __init__(self, startup: bool = False):
         self.cfg = Config.load()
         self.root = tk.Tk()
-        self.root.title("ncloud-sync")
+        self.root.title("GenDisk Sync")
         self.root.geometry("520x680")
         self._build_ui()
         self.worker = SyncWorker(self)
@@ -156,7 +156,7 @@ class App:
             messagebox.showwarning("입력 필요", "서버 주소·아이디·비밀번호를 모두 입력하세요.")
             return
         try:
-            c = NCloudClient(url)
+            c = GenDiskClient(url)
             c.login(user, pw)
             self.cfg.server_url, self.cfg.username, self.cfg.token = url, user, c.token
             if self.cfg.save_credentials:
@@ -177,7 +177,7 @@ class App:
         cfg = self.cfg
         pw = cfg.get_password()
         try:
-            c = NCloudClient(cfg.server_url)
+            c = GenDiskClient(cfg.server_url)
             c.login(cfg.username, pw)
             cfg.token = c.token
             cfg.save()
@@ -202,7 +202,7 @@ class App:
         if not (self.cfg.username and pw):
             return
         try:
-            c = NCloudClient(self.cfg.server_url)
+            c = GenDiskClient(self.cfg.server_url)
             c.login(self.cfg.username, pw)
             self.cfg.token = c.token
             self.cfg.save()

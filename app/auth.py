@@ -244,7 +244,7 @@ QR_TOKEN_MINUTES = 5
 
 
 def _qr_content(server: str, token: str) -> str:
-    return f"ncloud://login?server={quote(server, safe='')}&token={token}"
+    return f"gendisk://login?server={quote(server, safe='')}&token={token}"
 
 
 class QrCreate(BaseModel):
