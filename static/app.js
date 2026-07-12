@@ -88,6 +88,7 @@ async function showApp(user) {
   $("app-screen").classList.remove("hidden");
   $("whoami").textContent = user.is_admin ? `${user.username} (관리자)` : user.username;
   $("admin-btn").classList.toggle("hidden", !user.is_admin);
+  $("storage-btn").classList.toggle("hidden", !user.is_admin);
   // URL 해시(#/저장소/경로)가 있으면 그 위치에서 시작 (딥링크/새로고침 유지)
   const target = parseHash();
   if (target) currentSpace = target.space;
@@ -615,12 +616,9 @@ $("admin-btn").addEventListener("click", () => {
   loadUsers();
 });
 
-let availableMounts = []; // 관리자 모달에서 부여 가능한 전체 외부 저장소 이름
-
 async function loadUsers() {
   try {
     const data = await api("/api/admin/users");
-    availableMounts = data.available_mounts || [];
     $("admin-error").textContent = ""; // 이전 작업의 오류 메시지 제거
     renderUsers(data.users);
   } catch (err) {
@@ -654,16 +652,6 @@ function renderUsers(users) {
     tdUsage.textContent = u.quota_bytes ? `${used} / ${formatSize(u.quota_bytes)}` : `${used} / 무제한`;
     tr.appendChild(tdUsage);
 
-    const tdMounts = document.createElement("td");
-    if (u.is_admin) {
-      tdMounts.innerHTML = '<span class="me-note">전체</span>';
-    } else if (u.mounts && u.mounts.length) {
-      tdMounts.textContent = u.mounts.join(", ");
-    } else {
-      tdMounts.innerHTML = '<span class="me-note">없음</span>';
-    }
-    tr.appendChild(tdMounts);
-
     const tdActions = document.createElement("td");
     const wrap = document.createElement("div");
     wrap.className = "user-actions";
@@ -679,14 +667,6 @@ function renderUsers(users) {
       me.textContent = "본인";
       wrap.appendChild(me);
     } else {
-      // 저장소 권한은 일반 사용자에게만 (관리자는 항상 전체 접근)
-      if (!u.is_admin) {
-        const mounts = document.createElement("button");
-        mounts.textContent = "저장소 권한";
-        mounts.onclick = () => adminSetMounts(u);
-        wrap.appendChild(mounts);
-      }
-
       const pw = document.createElement("button");
       pw.textContent = "비밀번호 재설정";
       pw.onclick = () => adminResetPassword(u);
@@ -733,43 +713,80 @@ async function adminSetQuota(u) {
   }
 }
 
-let mountsTargetId = null;
+/* ---------- 외부 저장소 관리 (관리자) ---------- */
+$("storage-btn").addEventListener("click", () => {
+  $("storage-error").textContent = "";
+  $("storage-modal").classList.remove("hidden");
+  loadMounts();
+});
 
-function adminSetMounts(u) {
-  mountsTargetId = u.id;
-  $("mounts-error").textContent = "";
-  $("mounts-target").textContent = `"${u.username}" 사용자가 접근할 외부 저장소를 선택하세요.`;
-  const list = $("mounts-list");
-  list.innerHTML = "";
-  if (!availableMounts.length) {
-    list.innerHTML = '<p class="qr-desc">마운트된 외부 저장소가 없습니다.</p>';
-  } else {
-    const granted = new Set(u.mounts || []);
-    for (const name of availableMounts) {
-      const label = document.createElement("label");
-      label.className = "check-label mount-check";
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.value = name;
-      cb.checked = granted.has(name);
-      label.appendChild(cb);
-      label.appendChild(document.createTextNode(" 💾 " + name));
-      list.appendChild(label);
-    }
+async function loadMounts() {
+  try {
+    const data = await api("/api/admin/mounts");
+    $("storage-error").textContent = "";
+    renderMounts(data.mounts, data.users);
+  } catch (err) {
+    $("storage-error").textContent = err.message;
   }
-  $("mounts-modal").classList.remove("hidden");
 }
 
-$("mounts-save").addEventListener("click", async () => {
-  const mounts = [...document.querySelectorAll("#mounts-list input:checked")].map((c) => c.value);
-  try {
-    await postJSON("/api/admin/users/mounts", { user_id: mountsTargetId, mounts });
-    $("mounts-modal").classList.add("hidden");
-    loadUsers();
-  } catch (err) {
-    $("mounts-error").textContent = err.message;
+function renderMounts(mounts, users) {
+  const list = $("storage-list");
+  list.innerHTML = "";
+  if (!mounts.length) {
+    list.innerHTML =
+      '<p class="qr-desc">마운트된 외부 저장소가 없습니다. compose.yaml에서 <code>/app/mounts/이름</code>으로 볼륨을 추가하세요.</p>';
+    return;
   }
-});
+  for (const m of mounts) {
+    const card = document.createElement("div");
+    card.className = "storage-item";
+
+    const head = document.createElement("div");
+    head.className = "storage-head";
+    head.textContent = "💾 " + m.name;
+    if (m.readonly) {
+      const ro = document.createElement("span");
+      ro.className = "badge plain";
+      ro.textContent = "🔒 읽기 전용";
+      head.appendChild(ro);
+    }
+    card.appendChild(head);
+
+    const usersBox = document.createElement("div");
+    usersBox.className = "storage-users";
+    if (!users.length) {
+      usersBox.innerHTML = '<span class="me-note">일반 사용자가 없습니다 (관리자는 항상 접근 가능)</span>';
+    } else {
+      const granted = new Set(m.user_ids || []);
+      for (const u of users) {
+        const label = document.createElement("label");
+        label.className = "check-label";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = u.id;
+        cb.checked = granted.has(u.id);
+        cb.onchange = () => saveMountAccess(m.name, usersBox);
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(" " + u.username));
+        usersBox.appendChild(label);
+      }
+    }
+    card.appendChild(usersBox);
+    list.appendChild(card);
+  }
+}
+
+async function saveMountAccess(mountName, usersBox) {
+  const user_ids = [...usersBox.querySelectorAll("input:checked")].map((c) => Number(c.value));
+  try {
+    await postJSON("/api/admin/mounts/grant", { mount_name: mountName, user_ids });
+    $("storage-error").textContent = "";
+  } catch (err) {
+    $("storage-error").textContent = err.message;
+    loadMounts(); // 실패 시 서버 상태로 되돌림
+  }
+}
 
 async function adminResetPassword(u) {
   const pw = prompt(`"${u.username}"의 새 비밀번호 (4자 이상):`);

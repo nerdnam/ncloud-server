@@ -1,4 +1,5 @@
 """Admin-only user management."""
+import os
 import secrets
 import shutil
 import sqlite3
@@ -21,12 +22,8 @@ def list_users(admin: dict = Depends(require_admin)):
         rows = conn.execute(
             "SELECT id, username, is_admin, quota_bytes, created_at FROM users ORDER BY id"
         ).fetchall()
-        grant_rows = conn.execute("SELECT user_id, mount_name FROM mount_grants").fetchall()
     finally:
         conn.close()
-    grants: dict[int, list[str]] = {}
-    for g in grant_rows:
-        grants.setdefault(g["user_id"], []).append(g["mount_name"])
     users = []
     for row in rows:
         home = FILES_DIR / row["username"]
@@ -38,11 +35,9 @@ def list_users(admin: dict = Depends(require_admin)):
                 "created_at": row["created_at"],
                 "usage_bytes": dir_size(home) if home.is_dir() else 0,
                 "quota_bytes": row["quota_bytes"],
-                "mounts": sorted(grants.get(row["id"], [])),
             }
         )
-    # 저장소 권한 UI가 체크박스로 보여줄 전체 마운트 목록
-    return {"users": users, "available_mounts": [m.name for m in list_mounts()]}
+    return {"users": users}
 
 
 class NewUser(Credentials):
@@ -205,25 +200,70 @@ def set_quota(body: SetQuota, admin: dict = Depends(require_admin)):
     return {"ok": True}
 
 
-class SetMounts(BaseModel):
-    user_id: int
-    mounts: list[str]
+# ---------- 외부 저장소 관리 (저장소별 접근 사용자 지정) ----------
 
-
-@router.post("/users/mounts")
-def set_mounts(body: SetMounts, admin: dict = Depends(require_admin)):
-    """사용자가 접근 가능한 외부 마운트 목록을 통째로 교체한다."""
-    valid = {m.name for m in list_mounts()}
-    requested = {m for m in body.mounts if m in valid}  # 존재하는 마운트만 반영
+@router.get("/mounts")
+def list_mount_access(admin: dict = Depends(require_admin)):
+    """마운트된 외부 저장소 목록과 각 저장소에 접근 권한을 가진 사용자."""
     conn = get_db()
     try:
-        _get_target(conn, body.user_id)
-        conn.execute("DELETE FROM mount_grants WHERE user_id = ?", (body.user_id,))
+        user_rows = conn.execute(
+            "SELECT id, username, is_admin FROM users ORDER BY id"
+        ).fetchall()
+        grant_rows = conn.execute(
+            "SELECT mount_name, user_id FROM mount_grants"
+        ).fetchall()
+    finally:
+        conn.close()
+    by_mount: dict[str, list[int]] = {}
+    for g in grant_rows:
+        by_mount.setdefault(g["mount_name"], []).append(g["user_id"])
+    mounts = []
+    for m in list_mounts():
+        mounts.append(
+            {
+                "name": m.name,
+                "readonly": not os.access(m, os.W_OK),
+                "user_ids": sorted(by_mount.get(m.name, [])),
+            }
+        )
+    # 관리자는 항상 전체 접근이므로 권한 지정 대상은 일반 사용자만
+    users = [
+        {"id": u["id"], "username": u["username"]}
+        for u in user_rows
+        if not u["is_admin"]
+    ]
+    return {"mounts": mounts, "users": users}
+
+
+class GrantMount(BaseModel):
+    mount_name: str
+    user_ids: list[int]
+
+
+@router.post("/mounts/grant")
+def grant_mount(body: GrantMount, admin: dict = Depends(require_admin)):
+    """한 외부 저장소에 접근 가능한 사용자 목록을 통째로 교체한다."""
+    if body.mount_name not in {m.name for m in list_mounts()}:
+        raise HTTPException(404, "저장소를 찾을 수 없습니다")
+    conn = get_db()
+    try:
+        # 존재하는 일반 사용자만 반영 (관리자는 항상 전체 접근이라 굳이 저장하지 않음)
+        valid = {
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM users WHERE is_admin = 0"
+            ).fetchall()
+        }
+        requested = sorted(uid for uid in body.user_ids if uid in valid)
+        conn.execute(
+            "DELETE FROM mount_grants WHERE mount_name = ?", (body.mount_name,)
+        )
         conn.executemany(
             "INSERT INTO mount_grants (user_id, mount_name) VALUES (?, ?)",
-            [(body.user_id, name) for name in sorted(requested)],
+            [(uid, body.mount_name) for uid in requested],
         )
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "mounts": sorted(requested)}
+    return {"ok": True, "user_ids": requested}

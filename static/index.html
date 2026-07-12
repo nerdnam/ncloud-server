@@ -30,6 +30,7 @@
     <div class="header-actions">
       <span id="whoami"></span>
       <button id="admin-btn" class="btn subtle hidden">👥 사용자 관리</button>
+      <button id="storage-btn" class="btn subtle hidden">💾 외부 저장소</button>
       <button id="qr-btn" class="btn subtle">📱 QR 로그인</button>
       <button id="pw-btn" class="btn subtle">🔑 비밀번호 변경</button>
       <button id="logout-btn" class="btn subtle">로그아웃</button>
@@ -109,7 +110,7 @@
     <div class="table-wrap">
       <table id="user-table">
         <thead>
-          <tr><th>아이디</th><th>권한</th><th>가입일</th><th>사용량 / 제한</th><th>외부 저장소</th><th></th></tr>
+          <tr><th>아이디</th><th>권한</th><th>가입일</th><th>사용량 / 제한</th><th></th></tr>
         </thead>
         <tbody></tbody>
       </table>
@@ -128,17 +129,19 @@
   </div>
 </div>
 
-<!-- 외부 저장소 권한 모달 (관리자 전용) -->
-<div id="mounts-modal" class="modal hidden">
+<!-- 외부 저장소 관리 모달 (관리자 전용) -->
+<div id="storage-modal" class="modal hidden">
   <div class="modal-backdrop" data-close></div>
-  <div class="modal-card">
-    <h2>💾 외부 저장소 권한</h2>
-    <p id="mounts-target" class="qr-desc"></p>
-    <div id="mounts-list"></div>
-    <p id="mounts-error" class="auth-error"></p>
+  <div class="modal-card wide">
+    <h2>💾 외부 저장소 관리</h2>
+    <p class="qr-desc">
+      docker 볼륨을 <code>/app/mounts/이름</code>에 마운트하면 여기에 나타납니다.<br>
+      각 저장소에 접근할 사용자를 지정하세요. (관리자는 항상 전체 접근)
+    </p>
+    <div id="storage-list"></div>
+    <p id="storage-error" class="auth-error"></p>
     <div class="modal-actions">
-      <button type="button" class="btn" data-close>취소</button>
-      <button id="mounts-save" class="btn primary">저장</button>
+      <button type="button" class="btn" data-close>닫기</button>
     </div>
   </div>
 </div>
