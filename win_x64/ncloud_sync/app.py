@@ -1,13 +1,13 @@
-"""ncloud-sync GUI: 로그인 · 폴더 동기화 설정 · 드라이브 연결 · 백그라운드 동기화 루프.
+"""ncloud-sync GUI: 로그인 · 폴더 동기화 · 드라이브 연결 · 시작 옵션.
 
-tkinter(표준)로 창을 만들고, 백그라운드 스레드에서 주기적으로 동기화한다.
-pystray가 있으면 시스템 트레이 아이콘으로도 동작한다(없으면 창만).
+tkinter(표준)로 창을 만들고 백그라운드 스레드에서 주기적으로 동기화한다.
+설정에 따라 시작 시 자동 로그인 → 드라이브 자동 연결 → 자동 동기화까지 수행한다.
 """
 import threading
-import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from . import autostart
 from .client import ApiError, AuthError, NCloudClient
 from .config import Config
 from .engine import SyncEngine
@@ -36,43 +36,44 @@ class SyncWorker(threading.Thread):
             if cfg.enabled and cfg.is_ready():
                 try:
                     client = NCloudClient(cfg.server_url, cfg.token)
-                    engine = SyncEngine(client, cfg.space, cfg.local_folder,
-                                        log=self.app.log)
+                    engine = SyncEngine(client, cfg.space, cfg.local_folder, log=self.app.log)
                     self.app.set_status("동기화 중...")
                     summary = engine.run_once()
                     self.app.log(f"동기화 완료: {summary}")
                     self.app.set_status("대기 중 (마지막 동기화 성공)")
                 except AuthError:
-                    self.app.set_status("세션 만료 — 다시 로그인하세요")
-                    self.app.log("세션이 만료되었습니다.")
+                    self.app.set_status("세션 만료 — 자동 재로그인 시도")
+                    self.app.try_relogin()
                 except (ApiError, OSError) as e:
                     self.app.set_status("동기화 오류")
                     self.app.log(f"오류: {e}")
-            interval = max(5, self.app.cfg.interval_sec)
-            self._wake.wait(timeout=interval)
+            self._wake.wait(timeout=max(5, self.app.cfg.interval_sec))
             self._wake.clear()
 
 
 class App:
-    def __init__(self):
+    def __init__(self, startup: bool = False):
         self.cfg = Config.load()
         self.root = tk.Tk()
         self.root.title("ncloud-sync")
-        self.root.geometry("520x560")
+        self.root.geometry("520x680")
         self._build_ui()
         self.worker = SyncWorker(self)
         self.worker.start()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        if startup:
+            self.root.iconify()  # 자동 시작이면 최소화 상태로
+        # 시작 시 자동 로그인/드라이브 연결
+        if self.cfg.auto_login and self.cfg.username and self.cfg.get_password():
+            threading.Thread(target=self._auto_sequence, daemon=True).start()
 
     # ---------- UI ----------
     def _build_ui(self):
-        pad = {"padx": 10, "pady": 4}
         frm = ttk.Frame(self.root, padding=12)
         frm.pack(fill="both", expand=True)
 
         ttk.Label(frm, text="서버 주소 (예: https://cloud.example.com)").pack(anchor="w")
-        self.e_url = ttk.Entry(frm)
-        self.e_url.pack(fill="x")
+        self.e_url = ttk.Entry(frm); self.e_url.pack(fill="x")
         self.e_url.insert(0, self.cfg.server_url)
 
         row = ttk.Frame(frm); row.pack(fill="x", pady=(6, 0))
@@ -83,18 +84,32 @@ class App:
         right = ttk.Frame(row); right.pack(side="left", fill="x", expand=True, padx=(8, 0))
         ttk.Label(right, text="비밀번호").pack(anchor="w")
         self.e_pw = ttk.Entry(right, show="•"); self.e_pw.pack(fill="x")
+        if self.cfg.get_password():
+            self.e_pw.insert(0, self.cfg.get_password())
 
         self.btn_login = ttk.Button(frm, text="로그인", command=self._login)
         self.btn_login.pack(fill="x", pady=(6, 2))
         self.lbl_login = ttk.Label(frm, text=self._login_state_text(), foreground="#555")
         self.lbl_login.pack(anchor="w")
 
+        # 시작 옵션
+        opts = ttk.LabelFrame(frm, text="시작 옵션", padding=8)
+        opts.pack(fill="x", pady=(8, 0))
+        self.var_savecred = tk.BooleanVar(value=self.cfg.save_credentials)
+        self.var_autostart = tk.BooleanVar(value=self.cfg.auto_start)
+        self.var_autologin = tk.BooleanVar(value=self.cfg.auto_login)
+        self.var_autodrive = tk.BooleanVar(value=self.cfg.auto_connect_drive)
+        ttk.Checkbutton(opts, text="로그인 정보 저장 (암호화)", variable=self.var_savecred).pack(anchor="w")
+        ttk.Checkbutton(opts, text="Windows 시작 시 자동 실행", variable=self.var_autostart,
+                        command=self._apply_autostart).pack(anchor="w")
+        ttk.Checkbutton(opts, text="프로그램 시작 시 자동 로그인", variable=self.var_autologin).pack(anchor="w")
+        ttk.Checkbutton(opts, text="자동 로그인 후 드라이브 자동 연결", variable=self.var_autodrive).pack(anchor="w")
+
         ttk.Separator(frm).pack(fill="x", pady=8)
 
         ttk.Label(frm, text="동기화할 저장소").pack(anchor="w")
         self.cmb_space = ttk.Combobox(frm, state="readonly", values=["home"])
-        self.cmb_space.set(self.cfg.space)
-        self.cmb_space.pack(fill="x")
+        self.cmb_space.set(self.cfg.space); self.cmb_space.pack(fill="x")
 
         ttk.Label(frm, text="로컬 폴더").pack(anchor="w", pady=(6, 0))
         frow = ttk.Frame(frm); frow.pack(fill="x")
@@ -120,36 +135,34 @@ class App:
         drow = ttk.Frame(frm); drow.pack(fill="x", pady=(2, 0))
         ttk.Label(drow, text="드라이브 문자").pack(side="left")
         self.cmb_drive = ttk.Combobox(drow, state="readonly", width=5,
-                                      values=[f"{c}:" for c in "NPQRSVWXYZ"])
-        self.cmb_drive.set("N:"); self.cmb_drive.pack(side="left", padx=(6, 0))
+                                      values=[f"{c}:" for c in "NPQRSTVWXYZ"])
+        self.cmb_drive.set(self.cfg.drive_letter); self.cmb_drive.pack(side="left", padx=(6, 0))
         ttk.Button(drow, text="드라이브 연결", command=self._connect_drive).pack(side="left", padx=(6, 0))
         ttk.Button(drow, text="연결 해제", command=self._disconnect_drive).pack(side="left", padx=(6, 0))
 
         self.lbl_status = ttk.Label(frm, text="대기 중", foreground="#0a7")
         self.lbl_status.pack(anchor="w", pady=(8, 0))
-        self.txt_log = tk.Text(frm, height=8, state="disabled", wrap="word")
+        self.txt_log = tk.Text(frm, height=7, state="disabled", wrap="word")
         self.txt_log.pack(fill="both", expand=True, pady=(4, 0))
 
     def _login_state_text(self):
         return f"로그인됨: {self.cfg.username}" if self.cfg.token else "로그인 필요"
 
     # ---------- 동작 ----------
-    def _client(self):
-        return NCloudClient(self.e_url.get().strip(), self.cfg.token)
-
     def _login(self):
-        url = self.e_url.get().strip()
-        user = self.e_user.get().strip()
-        pw = self.e_pw.get()
+        self._collect()
+        url, user, pw = self.e_url.get().strip(), self.e_user.get().strip(), self.e_pw.get()
         if not url or not user or not pw:
             messagebox.showwarning("입력 필요", "서버 주소·아이디·비밀번호를 모두 입력하세요.")
             return
         try:
             c = NCloudClient(url)
             c.login(user, pw)
-            self.cfg.server_url = url
-            self.cfg.username = user
-            self.cfg.token = c.token
+            self.cfg.server_url, self.cfg.username, self.cfg.token = url, user, c.token
+            if self.cfg.save_credentials:
+                self.cfg.set_password(pw)
+            else:
+                self.cfg.clear_password()
             self.cfg.save()
             self.lbl_login.config(text=self._login_state_text())
             self._refresh_spaces(c)
@@ -158,6 +171,44 @@ class App:
             messagebox.showerror("로그인 실패", str(e))
         except (ApiError, OSError) as e:
             messagebox.showerror("연결 오류", str(e))
+
+    def _auto_sequence(self):
+        """시작 시: 자동 로그인 → (설정 시) 드라이브 연결 → 동기화 트리거."""
+        cfg = self.cfg
+        pw = cfg.get_password()
+        try:
+            c = NCloudClient(cfg.server_url)
+            c.login(cfg.username, pw)
+            cfg.token = c.token
+            cfg.save()
+            self.set_status("자동 로그인 성공")
+            self.log("자동 로그인 성공")
+        except Exception as e:
+            self.set_status("자동 로그인 실패")
+            self.log(f"자동 로그인 실패: {e}")
+            return
+        if cfg.auto_connect_drive:
+            try:
+                connect_drive(cfg.drive_letter, cfg.server_url, cfg.username, pw)
+                self.log(f"{cfg.drive_letter} 드라이브 자동 연결")
+            except Exception as e:
+                self.log(f"드라이브 자동 연결 실패: {e}")
+        if cfg.enabled:
+            self.worker.sync_now()
+
+    def try_relogin(self):
+        """세션 만료 시 저장된 정보로 조용히 재로그인."""
+        pw = self.cfg.get_password()
+        if not (self.cfg.username and pw):
+            return
+        try:
+            c = NCloudClient(self.cfg.server_url)
+            c.login(self.cfg.username, pw)
+            self.cfg.token = c.token
+            self.cfg.save()
+            self.log("세션 재로그인 성공")
+        except Exception as e:
+            self.log(f"재로그인 실패: {e}")
 
     def _refresh_spaces(self, client):
         try:
@@ -171,32 +222,44 @@ class App:
     def _pick_folder(self):
         d = filedialog.askdirectory()
         if d:
-            self.e_folder.delete(0, "end")
-            self.e_folder.insert(0, d)
+            self.e_folder.delete(0, "end"); self.e_folder.insert(0, d)
+
+    def _apply_autostart(self):
+        try:
+            autostart.sync(self.var_autostart.get())
+        except OSError as e:
+            messagebox.showerror("자동 실행 등록 실패", str(e))
 
     def _collect(self):
         self.cfg.server_url = self.e_url.get().strip()
         self.cfg.space = self.cmb_space.get() or "home"
         self.cfg.local_folder = self.e_folder.get().strip()
+        self.cfg.drive_letter = self.cmb_drive.get()
         try:
             self.cfg.interval_sec = max(5, int(self.e_interval.get()))
         except ValueError:
             self.cfg.interval_sec = 30
         self.cfg.enabled = self.var_enabled.get()
+        self.cfg.save_credentials = self.var_savecred.get()
+        self.cfg.auto_start = self.var_autostart.get()
+        self.cfg.auto_login = self.var_autologin.get()
+        self.cfg.auto_connect_drive = self.var_autodrive.get()
+        if not self.cfg.save_credentials:
+            self.cfg.clear_password()
+        elif self.e_pw.get():
+            self.cfg.set_password(self.e_pw.get())
 
     def _save(self):
         self._collect()
         self.cfg.save()
+        self._apply_autostart()
         self.log("설정을 저장했습니다.")
 
     def _toggle_enabled(self):
-        self._collect()
-        self.cfg.save()
-        self.worker.sync_now()
+        self._collect(); self.cfg.save(); self.worker.sync_now()
 
     def _sync_now(self):
-        self._collect()
-        self.cfg.save()
+        self._collect(); self.cfg.save()
         if not self.cfg.is_ready():
             messagebox.showwarning("설정 필요", "로그인하고 로컬 폴더를 지정하세요.")
             return
@@ -204,16 +267,12 @@ class App:
 
     def _connect_drive(self):
         self._collect()
-        if not self.cfg.server_url or not self.cfg.username:
-            messagebox.showwarning("설정 필요", "서버 주소와 아이디가 필요합니다.")
-            return
-        pw = self.e_pw.get()
-        if not pw:
-            messagebox.showwarning("비밀번호 필요", "드라이브 연결에는 비밀번호를 입력하세요.")
+        pw = self.e_pw.get() or self.cfg.get_password()
+        if not self.cfg.server_url or not self.cfg.username or not pw:
+            messagebox.showwarning("정보 필요", "서버 주소·아이디·비밀번호가 필요합니다.")
             return
         try:
-            connect_drive(self.cmb_drive.get(), self.cfg.server_url,
-                          self.cfg.username, pw)
+            connect_drive(self.cmb_drive.get(), self.cfg.server_url, self.cfg.username, pw)
             self.log(f"{self.cmb_drive.get()} 드라이브로 연결했습니다.")
         except Exception as e:
             messagebox.showerror("드라이브 연결 실패", str(e))
@@ -238,8 +297,7 @@ class App:
         self.root.after(0, _append)
 
     def _on_close(self):
-        self._collect()
-        self.cfg.save()
+        self._collect(); self.cfg.save()
         self.worker.stop()
         self.root.destroy()
 
@@ -247,5 +305,5 @@ class App:
         self.root.mainloop()
 
 
-def main():
-    App().run()
+def main(startup: bool = False):
+    App(startup=startup).run()

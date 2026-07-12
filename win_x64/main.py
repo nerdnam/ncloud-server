@@ -1,7 +1,8 @@
 """ncloud-sync 진입점.
 
-  python main.py           GUI 실행
-  python main.py --once    설정에 저장된 대로 한 번만 동기화 (자동화/테스트용)
+  python main.py            GUI 실행
+  python main.py --startup  자동 시작(최소화)으로 GUI 실행 — 자동 로그인/드라이브 연결 수행
+  python main.py --once     설정에 저장된 대로 한 번만 동기화 (자동화/테스트용)
 """
 import sys
 
@@ -23,7 +24,7 @@ def main():
         return
 
     from ncloud_sync.app import main as gui_main
-    gui_main()
+    gui_main(startup="--startup" in sys.argv)
 
 
 if __name__ == "__main__":
