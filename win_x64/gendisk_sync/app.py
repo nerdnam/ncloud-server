@@ -70,6 +70,9 @@ class App:
         if startup:
             # 자동 시작이면 트레이만 남기고 창은 숨김 (트레이 없으면 최소화)
             (self._hide_to_tray if self.tray else self.root.iconify)()
+        # 시작 시 자동 로그인 → (설정 시) 드라이브 연결 → 동기화 트리거
+        if self.cfg.auto_login and self.cfg.username and self.cfg.get_password():
+            threading.Thread(target=self._auto_sequence, daemon=True).start()
 
     # ---------- 시스템 트레이 ----------
     def _build_tray(self):
@@ -120,9 +123,6 @@ class App:
             except Exception:
                 pass
         self.root.destroy()
-        # 시작 시 자동 로그인/드라이브 연결
-        if self.cfg.auto_login and self.cfg.username and self.cfg.get_password():
-            threading.Thread(target=self._auto_sequence, daemon=True).start()
 
     # ---------- UI ----------
     def _build_ui(self):
