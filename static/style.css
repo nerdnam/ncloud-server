@@ -1,6 +1,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
+  color-scheme: light;
   --bg: #f4f6f9;
   --card: #ffffff;
   --text: #1e2530;
@@ -10,6 +11,41 @@
   --border: #e2e6ec;
   --danger: #d94848;
   --radius: 10px;
+  /* 보조 시맨틱 색 (다크 모드에서 함께 바뀜) */
+  --hover-bg: #eef1f6;      /* 버튼·항목 hover */
+  --subtle-bg: #f0f2f6;     /* 배지·코드·보조 배경 */
+  --active-bg: #e7eefc;     /* 선택 상태 배경 (accent 텍스트와 함께) */
+  --icon-bg: #f6f8fb;       /* 파일 아이콘 배경 / 목록 hover */
+  --info-bg: #eef4ff;       /* 드롭·업로드 안내 배경 */
+  --info-border: #c9dbff;
+  --success: #1d9e50;
+  --overlay-btn-bg: rgba(255, 255, 255, .95);  /* 엔트리 위 액션 버튼 */
+  --shadow-sm: 0 4px 14px rgba(20, 30, 60, .1);
+  --shadow-md: 0 8px 30px rgba(20, 30, 60, .08);
+  --shadow-lg: 0 12px 40px rgba(10, 16, 32, .25);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #14181f;
+  --card: #1c222c;
+  --text: #e6eaf0;
+  --muted: #97a1b2;
+  --accent: #5b8def;
+  --accent-hover: #79a2f2;
+  --border: #2c333f;
+  --danger: #ec7373;
+  --hover-bg: #262d38;
+  --subtle-bg: #262d38;
+  --active-bg: #26375a;
+  --icon-bg: #232a35;
+  --info-bg: #1c2a44;
+  --info-border: #32496f;
+  --success: #55c988;
+  --overlay-btn-bg: rgba(28, 34, 44, .92);
+  --shadow-sm: 0 4px 14px rgba(0, 0, 0, .4);
+  --shadow-md: 0 8px 30px rgba(0, 0, 0, .45);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, .55);
 }
 
 body {
@@ -31,11 +67,11 @@ body {
   text-decoration: none;
   display: inline-block;
 }
-.btn:hover { background: #eef1f6; }
+.btn:hover { background: var(--hover-bg); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.primary:hover { background: var(--accent-hover); }
 .btn.subtle { border-color: transparent; background: transparent; color: var(--muted); }
-.btn.subtle:hover { color: var(--text); background: #eef1f6; }
+.btn.subtle:hover { color: var(--text); background: var(--hover-bg); }
 
 /* ---------- 로그인 ---------- */
 #auth-screen {
@@ -49,7 +85,7 @@ body {
   padding: 40px 36px;
   width: 340px;
   text-align: center;
-  box-shadow: 0 8px 30px rgba(20, 30, 60, .08);
+  box-shadow: var(--shadow-md);
 }
 .auth-card h1 { font-size: 26px; margin-bottom: 6px; }
 #auth-subtitle { color: var(--muted); margin-bottom: 22px; font-size: 14px; }
@@ -89,7 +125,7 @@ header {
 #usage-badge {
   font-size: 12px;
   color: var(--muted);
-  background: #f0f2f6;
+  background: var(--subtle-bg);
   padding: 4px 10px;
   border-radius: 20px;
   white-space: nowrap;
@@ -129,8 +165,8 @@ header {
   text-align: left;
   width: 100%;
 }
-.space-item:hover { background: #eef1f6; }
-.space-item.active { background: #e7eefc; color: var(--accent); font-weight: 600; }
+.space-item:hover { background: var(--hover-bg); }
+.space-item.active { background: var(--active-bg); color: var(--accent); font-weight: 600; }
 .space-item .ro { margin-left: auto; font-size: 11px; }
 .side-hint {
   margin-top: 18px;
@@ -139,7 +175,7 @@ header {
   line-height: 1.6;
   color: var(--muted);
 }
-.side-hint code { background: #f0f2f6; padding: 1px 4px; border-radius: 4px; font-size: 10px; }
+.side-hint code { background: var(--subtle-bg); padding: 1px 4px; border-radius: 4px; font-size: 10px; }
 .content { flex: 1; min-width: 0; }
 #readonly-badge { font-size: 13px; color: var(--muted); align-self: center; }
 
@@ -158,7 +194,7 @@ header {
 }
 #breadcrumb { font-size: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 #breadcrumb a { color: var(--accent); text-decoration: none; padding: 4px 6px; border-radius: 6px; }
-#breadcrumb a:hover { background: #e7eefc; }
+#breadcrumb a:hover { background: var(--active-bg); }
 #breadcrumb .sep { color: var(--muted); }
 #breadcrumb .current { color: var(--text); font-weight: 600; padding: 4px 6px; }
 .toolbar-actions { display: flex; gap: 8px; align-items: center; }
@@ -180,8 +216,8 @@ header {
   line-height: 1;
 }
 .view-toggle button + button { border-left: 1px solid var(--border); }
-.view-toggle button:hover { background: #eef1f6; color: var(--text); }
-.view-toggle button.active { background: #e7eefc; color: var(--accent); }
+.view-toggle button:hover { background: var(--hover-bg); color: var(--text); }
+.view-toggle button.active { background: var(--active-bg); color: var(--accent); }
 
 #drop-hint {
   display: none;
@@ -191,7 +227,7 @@ header {
   border-radius: var(--radius);
   text-align: center;
   color: var(--accent);
-  background: #eef4ff;
+  background: var(--info-bg);
   font-size: 15px;
 }
 body.dragging #drop-hint { display: block; }
@@ -199,8 +235,8 @@ body.dragging #drop-hint { display: block; }
 #upload-status {
   margin: 10px 24px 0;
   padding: 10px 16px;
-  background: #eef4ff;
-  border: 1px solid #c9dbff;
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
   border-radius: var(--radius);
   font-size: 14px;
   color: var(--accent);
@@ -222,14 +258,14 @@ body.dragging #drop-hint { display: block; }
   position: relative;
   transition: box-shadow .15s, transform .15s;
 }
-.entry:hover { box-shadow: 0 4px 14px rgba(20, 30, 60, .1); transform: translateY(-2px); }
+.entry:hover { box-shadow: var(--shadow-sm); transform: translateY(-2px); }
 .entry .icon {
   height: 90px;
   display: flex; align-items: center; justify-content: center;
   font-size: 46px;
   margin-bottom: 8px;
   border-radius: 8px;
-  background: #f6f8fb;
+  background: var(--icon-bg);
   overflow: hidden;
 }
 .entry .icon img { width: 100%; height: 100%; object-fit: cover; }
@@ -253,7 +289,7 @@ body.dragging #drop-hint { display: block; }
 .entry:hover .actions { display: flex; }
 .entry .actions button, .entry .actions a {
   border: none;
-  background: rgba(255, 255, 255, .95);
+  background: var(--overlay-btn-bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   width: 28px; height: 28px;
@@ -263,8 +299,47 @@ body.dragging #drop-hint { display: block; }
   text-decoration: none;
   color: var(--text);
 }
-.entry .actions button:hover, .entry .actions a:hover { background: #eef1f6; }
+.entry .actions button:hover, .entry .actions a:hover { background: var(--hover-bg); }
 .entry .actions .del:hover { color: var(--danger); }
+
+/* ---------- 다중 선택 (체크박스) ---------- */
+.entry .checkbox {
+  position: absolute;
+  top: 6px; left: 6px;
+  z-index: 2;
+  width: 18px; height: 18px;
+  cursor: pointer;
+  accent-color: var(--accent);
+  display: none;
+}
+.entry:hover .checkbox,
+.entry.selected .checkbox,
+#file-list.has-selection .entry .checkbox { display: block; }
+.entry.selected { border-color: var(--accent); background: var(--active-bg); }
+
+/* 목록 보기: 체크박스를 아이콘 앞 인라인으로(자리 항상 확보해 흔들림 방지) */
+#file-list.view-list .entry .checkbox {
+  position: static;
+  flex-shrink: 0;
+  display: block;
+  visibility: hidden;
+}
+#file-list.view-list .entry:hover .checkbox,
+#file-list.view-list .entry.selected .checkbox,
+#file-list.view-list.has-selection .entry .checkbox { visibility: visible; }
+
+#selection-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 8px;
+  margin: 10px 24px 0;
+  padding: 8px 14px;
+  background: var(--active-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+#selection-bar #sel-count { font-weight: 600; color: var(--accent); }
+#selection-bar .sel-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 #empty-hint {
   text-align: center;
@@ -307,7 +382,7 @@ body.dragging #drop-hint { display: block; }
   border-bottom-left-radius: var(--radius);
   border-bottom-right-radius: var(--radius);
 }
-#file-list.view-list .entry:hover { transform: none; box-shadow: none; background: #f6f8fb; }
+#file-list.view-list .entry:hover { transform: none; box-shadow: none; background: var(--icon-bg); }
 #file-list.view-list .entry .icon {
   height: 34px; width: 34px;
   flex-shrink: 0;
@@ -358,7 +433,7 @@ body.dragging #drop-hint { display: block; }
   width: min(380px, calc(100vw - 32px));
   max-height: calc(100vh - 60px);
   overflow-y: auto;
-  box-shadow: 0 12px 40px rgba(10, 16, 32, .25);
+  box-shadow: var(--shadow-lg);
 }
 .modal-card.wide { width: min(680px, calc(100vw - 32px)); }
 .modal-card h2 { font-size: 18px; margin-bottom: 16px; }
@@ -417,17 +492,17 @@ body.dragging #drop-hint { display: block; }
   font-size: 12px;
   cursor: pointer;
 }
-#user-table .user-actions button:hover { background: #eef1f6; }
+#user-table .user-actions button:hover { background: var(--hover-bg); }
 #user-table .user-actions .danger:hover { color: var(--danger); border-color: var(--danger); }
 .badge {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 20px;
   font-size: 11px;
-  background: #e7eefc;
+  background: var(--active-bg);
   color: var(--accent);
 }
-.badge.plain { background: #f0f2f6; color: var(--muted); }
+.badge.plain { background: var(--subtle-bg); color: var(--muted); }
 .me-note { color: var(--muted); font-size: 12px; }
 
 /* ---------- QR 로그인 ---------- */
@@ -446,7 +521,7 @@ body.dragging #drop-hint { display: block; }
 }
 #qr-img[src=""] { visibility: hidden; }
 .qr-status { font-size: 13px; color: var(--muted); margin-top: 12px; min-height: 1.2em; }
-.qr-status.ok { color: #1d9e50; font-weight: 600; }
+.qr-status.ok { color: var(--success); font-weight: 600; }
 .qr-card .modal-actions { justify-content: center; }
 
 /* ---------- 미리보기 ---------- */

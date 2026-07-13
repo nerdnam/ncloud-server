@@ -6,6 +6,16 @@
   <title>GenDisk</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☁️</text></svg>">
+  <script>
+    // 다크/라이트 테마를 본문 렌더 전에 적용해 깜빡임(FOUC)을 막는다.
+    (function () {
+      try {
+        var t = localStorage.getItem('ncloud_theme');
+        var dark = t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
 
@@ -28,6 +38,7 @@
   <header>
     <div class="brand">☁️ GenDisk</div>
     <div class="header-actions">
+      <button id="theme-btn" class="btn subtle" title="다크 모드 전환" aria-label="다크 모드 전환">🌙</button>
       <a id="win-download" class="btn subtle hidden" href="/download/windows" title="Windows 동기화 앱 다운로드">⬇ Windows 앱</a>
       <span id="usage-badge" class="hidden" title="개인 저장소 사용량"></span>
       <span id="whoami"></span>
@@ -64,6 +75,17 @@
 
       <div id="drop-hint">여기에 파일을 놓으면 업로드됩니다</div>
       <div id="upload-status" class="hidden"></div>
+
+      <div id="selection-bar" class="hidden">
+        <span id="sel-count">0개 선택</span>
+        <div class="sel-actions">
+          <button id="sel-all" class="btn subtle">전체 선택</button>
+          <button id="sel-download" class="btn subtle">⬇ 다운로드</button>
+          <button id="sel-move" class="btn subtle">📁 이동</button>
+          <button id="sel-delete" class="btn subtle">🗑 삭제</button>
+          <button id="sel-clear" class="btn subtle">✕ 선택 해제</button>
+        </div>
+      </div>
 
       <main id="file-list"></main>
       <div id="empty-hint" class="hidden">폴더가 비어 있습니다</div>
