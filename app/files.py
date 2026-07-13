@@ -182,16 +182,32 @@ def list_dir(path: str = "", space: str = HOME_SPACE, user: dict = Depends(curre
     if not target.is_dir():
         raise HTTPException(404, "폴더를 찾을 수 없습니다")
     root = space_root(user, space)
+    rel_base = target.relative_to(root).as_posix() if target != root else ""
     try:
-        children = list(target.iterdir())
+        with os.scandir(target) as it:
+            dirents = list(it)
     except OSError as exc:
         raise _fs_error(exc)
     entries = []
-    for p in children:
+    for de in dirents:
         try:
-            entries.append(entry_info(p, root))
+            entries.append(entry_info(Path(de.path), root))
         except OSError:
-            continue  # 접근 불가 항목(권한 등)은 건너뜀
+            # stat 이 막혀도(권한, 깨진 링크, 마운트 문제 등) 이름은 보여준다.
+            # 통째로 숨기면 클라이언트에서 "폴더가 비어 보이는" 원인 불명 증상이 된다.
+            try:
+                is_dir = de.is_dir(follow_symlinks=False)
+            except OSError:
+                is_dir = False
+            entries.append({
+                "name": de.name,
+                "path": f"{rel_base}/{de.name}" if rel_base else de.name,
+                "is_dir": is_dir,
+                "size": 0,
+                "mtime": 0,
+                "kind": "folder" if is_dir else file_kind(Path(de.name)),
+                "etag": None,
+            })
     entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
     return {
         "space": space or HOME_SPACE,
