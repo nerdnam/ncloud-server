@@ -56,7 +56,7 @@ class App:
     def __init__(self, startup: bool = False):
         self.cfg = Config.load()
         self.root = tk.Tk()
-        self.root.title("GenDisk Sync")
+        self.root.title("genDISK Sync")
         self.root.geometry("520x680")
         self._build_ui()
         self.worker = SyncWorker(self)
@@ -91,7 +91,7 @@ class App:
             pystray.MenuItem("종료", self._tray_quit),
         )
         try:
-            self.tray = pystray.Icon("gendisk-sync", img, "GenDisk Sync", menu)
+            self.tray = pystray.Icon("gendisk-sync", img, "genDISK Sync", menu)
             import threading
             threading.Thread(target=self.tray.run, daemon=True).start()
         except Exception:
@@ -104,7 +104,7 @@ class App:
             self._tray_notified = True
             try:
                 self.tray.notify("트레이에서 계속 실행됩니다. 아이콘을 눌러 다시 열 수 있어요.",
-                                 "GenDisk Sync")
+                                 "genDISK Sync")
             except Exception:
                 pass
 

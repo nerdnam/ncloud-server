@@ -1,13 +1,13 @@
 # gendisk-sync (Windows 클라이언트)
 
-GenDisk 서버에 연결하는 Windows용 프로그램. 두 가지 방식으로 씁니다.
+genDISK 서버에 연결하는 Windows용 프로그램. 두 가지 방식으로 씁니다.
 
 1. **일반 디스크처럼 사용** — WebDAV 네트워크 드라이브로 연결하면 탐색기에서 드라이브 문자(예: `N:`)로 나타나 바로 열고 저장합니다 (온디맨드, 전체 복사 없음).
 2. **폴더 동기화** — 지정한 로컬 폴더를 서버 저장소와 양방향 자동 동기화합니다 (원할 때만 켜는 선택 기능).
 
 ## 받기 / 실행
 
-- **바로 받기**: GenDisk 웹 UI의 "⬇ Windows 앱" 버튼, 또는 [GitHub Releases](https://github.com/nerdnam/gendisk.cloud/releases)의 `gendisk-sync-<버전>.exe` (파이썬 불필요, 더블클릭 실행).
+- **바로 받기**: genDISK 웹 UI의 "⬇ Windows 앱" 버튼, 또는 [GitHub Releases](https://github.com/nerdnam/gendisk.cloud/releases)의 `gendisk-sync-<버전>.exe` (파이썬 불필요, 더블클릭 실행).
 - **소스로 실행** (파이썬 설치 시):
 
 ```
