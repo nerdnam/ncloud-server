@@ -1,17 +1,32 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller 스펙 — 단일 실행파일(onefile), 창 모드(콘솔 숨김)
+from PyInstaller.utils.hooks import collect_all
+
+datas = []
+binaries = []
+hiddenimports = [
+    'gendisk_sync', 'gendisk_sync.app', 'gendisk_sync.client',
+    'gendisk_sync.config', 'gendisk_sync.engine',
+    'gendisk_sync.autostart', 'gendisk_sync.secret',
+    'gendisk_sync.webdav_mount',
+    'pystray', 'pystray._win32',
+    'PIL', 'PIL.Image', 'PIL.ImageDraw',
+]
+
+# customtkinter 는 테마 JSON·폰트 등 데이터 파일을 함께 번들해야 실행된다.
+# darkdetect 는 시스템 다크/라이트 감지에 쓰인다.
+for pkg in ('customtkinter', 'darkdetect'):
+    d, b, h = collect_all(pkg)
+    datas += d
+    binaries += b
+    hiddenimports += h
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['gendisk_sync', 'gendisk_sync.app', 'gendisk_sync.client',
-                   'gendisk_sync.config', 'gendisk_sync.engine',
-                   'gendisk_sync.autostart', 'gendisk_sync.secret',
-                   'gendisk_sync.webdav_mount',
-                   'pystray', 'pystray._win32',
-                   'PIL', 'PIL.Image', 'PIL.ImageDraw'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
