@@ -410,7 +410,7 @@ function renderEntries(entries) {
     const sh = document.createElement("button");
     sh.textContent = "🔗";
     sh.title = "공유 링크 만들기";
-    sh.onclick = (e) => { e.stopPropagation(); openShareModal(currentSpace, entry.path, entry.name); };
+    sh.onclick = (e) => { e.stopPropagation(); openShareModal(currentSpace, [entry.path], entry.name); };
     actions.appendChild(sh);
     if (!isReadonly()) {
       const rn = document.createElement("button");
@@ -454,8 +454,8 @@ function updateSelectionUI() {
     const ro = isReadonly();
     $("sel-move").classList.toggle("hidden", ro);
     $("sel-delete").classList.toggle("hidden", ro);
-    // 공유는 한 번에 한 항목만 (읽기 전용에서도 허용)
-    $("sel-share").classList.toggle("hidden", n !== 1);
+    // 공유: 1개면 단일 링크, 여러 개면 컬렉션 링크 (읽기 전용에서도 허용)
+    $("sel-share").classList.toggle("hidden", n < 1);
     const allSelected = currentEntries.length > 0 && currentEntries.every((e) => selection.has(e.path));
     $("sel-all").textContent = allSelected ? "전체 해제" : "전체 선택";
   }
@@ -645,21 +645,23 @@ $("sel-move").addEventListener("click", bulkMove);
 $("sel-delete").addEventListener("click", bulkDelete);
 
 function shareSelected() {
-  if (selection.size !== 1) return;
-  const path = [...selection][0];
-  const entry = currentEntries.find((e) => e.path === path);
-  openShareModal(currentSpace, path, entry ? entry.name : path.split("/").pop());
+  if (selection.size < 1) return;
+  const paths = [...selection];
+  const name = paths.length === 1
+    ? (currentEntries.find((e) => e.path === paths[0])?.name || paths[0].split("/").pop())
+    : `${paths.length}개 항목`;
+  openShareModal(currentSpace, paths, name);
 }
 
 /* ---------- 외부 공유 링크 ---------- */
-let shareTarget = null;   // {space, path, name}
+let shareTarget = null;   // {space, paths, name}
 
 function shareUrl(token) {
   return `${location.origin}/s/${token}`;
 }
 
-function openShareModal(space, path, name) {
-  shareTarget = { space, path, name };
+function openShareModal(space, paths, name) {
+  shareTarget = { space, paths, name };
   $("share-target-name").textContent = name;
   $("share-password").value = "";
   $("share-expiry").value = "7";
@@ -674,14 +676,14 @@ $("share-create-btn").addEventListener("click", async () => {
   $("share-create-error").textContent = "";
   const password = $("share-password").value;
   const expVal = $("share-expiry").value;
-  const body = { space: shareTarget.space, path: shareTarget.path };
+  const body = { space: shareTarget.space, paths: shareTarget.paths };
   if (password) body.password = password;
   if (expVal) body.expires_days = parseInt(expVal, 10);
   try {
     const data = await postJSON("/api/shares/create", body);
     const link = shareUrl(data.token);
     $("share-link").value = link;
-    const bits = [data.is_dir ? "폴더" : "파일"];
+    const bits = [data.collection ? `${data.count}개 항목` : (data.is_dir ? "폴더" : "파일")];
     if (data.protected) bits.push("🔒 비밀번호 보호");
     bits.push(data.expires_at ? `${new Date(data.expires_at).toLocaleDateString("ko-KR")} 만료` : "무기한");
     $("share-result-meta").textContent = bits.join(" · ");

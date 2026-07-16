@@ -89,6 +89,15 @@ def init_db() -> None:
                 share_token TEXT NOT NULL REFERENCES shares(token) ON DELETE CASCADE,
                 expires_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS share_items (
+                -- 컬렉션 공유(여러 항목을 담은 링크 하나)의 구성 항목.
+                -- 단일 항목 공유는 shares.path 를 그대로 쓰고 이 표를 쓰지 않는다.
+                -- (컬렉션 공유는 shares.path 가 빈 문자열이고 여기에 항목들이 들어간다.)
+                share_token TEXT NOT NULL REFERENCES shares(token) ON DELETE CASCADE,
+                path TEXT NOT NULL,               -- space 루트 기준 상대경로
+                is_dir INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_share_items_token ON share_items(share_token);
             """
         )
         # 구버전 DB 마이그레이션: 누락된 컬럼 추가, 첫 사용자를 관리자로 승격
