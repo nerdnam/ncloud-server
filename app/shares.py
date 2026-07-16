@@ -41,7 +41,13 @@ SHARE_COOKIE = "gd_share"
 UNLOCK_HOURS = 12
 MIN_SHARE_PASSWORD = 4
 MAX_LIST_ENTRIES = 20000          # 공개 목록이 무한정 커지지 않도록 상한
+MAX_SHARE_ITEMS = 200             # 컬렉션 한 개에 담을 수 있는 항목 수 상한
 THUMB_SIZE = 256
+
+
+def _like_escape(s: str) -> str:
+    r"""SQL LIKE 패턴의 특수문자(%, _, \)를 이스케이프. ESCAPE '\' 와 함께 쓴다."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 # 인라인 렌더를 허용할 미디어 접두사. 그 외(html/svg/pdf/txt…)는 첨부로 강제한다.
 _SAFE_INLINE = ("image/", "video/", "audio/")
@@ -291,16 +297,18 @@ def drop_shares_for(owner_id: int, space: str, path: str) -> None:
     try:
         conn = get_db()
         try:
+            like = _like_escape(rel) + "/%"   # 하위 경로 매칭 (%,_ 는 리터럴로)
             # 1) 단일 공유 제거
             conn.execute(
-                "DELETE FROM shares WHERE owner_id = ? AND space = ? AND (path = ? OR path LIKE ?)",
-                (owner_id, space, rel, rel + "/%"),
+                "DELETE FROM shares WHERE owner_id = ? AND space = ? "
+                "AND (path = ? OR path LIKE ? ESCAPE '\\')",
+                (owner_id, space, rel, like),
             )
             # 2) 컬렉션에서 해당 경로(및 하위) 항목 제거
             conn.execute(
-                "DELETE FROM share_items WHERE (path = ? OR path LIKE ?) AND share_token IN "
+                "DELETE FROM share_items WHERE (path = ? OR path LIKE ? ESCAPE '\\') AND share_token IN "
                 "(SELECT token FROM shares WHERE owner_id = ? AND space = ?)",
-                (rel, rel + "/%", owner_id, space),
+                (rel, like, owner_id, space),
             )
             # 3) 항목이 모두 사라진 컬렉션 공유 제거
             conn.execute(
@@ -331,6 +339,8 @@ def create_share(body: ShareCreate, user: dict = Depends(current_user)):
     raw = list(body.paths) if body.paths else ([body.path] if body.path else [])
     if not raw:
         raise HTTPException(400, "공유할 대상이 없습니다")
+    if len(raw) > MAX_SHARE_ITEMS:
+        raise HTTPException(400, f"한 번에 최대 {MAX_SHARE_ITEMS}개까지 공유할 수 있습니다")
 
     # safe_path/space_root 가 트래버설 + 소유자의 space 접근권을 강제한다
     root = files_mod.space_root(user, body.space)
@@ -555,8 +565,8 @@ def share_list(token: str, request: Request, path: str = ""):
     if _is_collection(share):
         item_root, sub = _resolve_collection(share, path)
         if item_root is None:
-            # 컬렉션 루트: 담긴 항목들을 나열
-            items = _collection_items(share)
+            # 컬렉션 루트: 담긴 항목들을 나열 (생성 시 MAX_SHARE_ITEMS 로 제한되지만 방어적으로 상한)
+            items = _collection_items(share)[:MAX_LIST_ENTRIES]
             entries = []
             for it in items:
                 try:
