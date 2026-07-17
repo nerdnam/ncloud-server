@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- GenDisk 앱 아이콘 (512x512). Play 스토어용 PNG로 내보내 쓰거나 문서에 사용. -->
+  <rect width="512" height="512" rx="112" fill="#1565C0"/>
+  <path d="M353.8,322 A118,118 0 1 1 353.8,190"
+        fill="none" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round"/>
+  <path d="M256,256 L344,256"
+        fill="none" stroke="#FFFFFF" stroke-width="48" stroke-linecap="round"/>
+</svg>

@@ -13,8 +13,8 @@ hiddenimports = [
     'PIL', 'PIL.Image', 'PIL.ImageDraw',
 ]
 
-# 앱 아이콘(.ico)을 번들 루트에 넣어 실행 중 창 아이콘으로도 쓴다.
-datas += [('gendisk.ico', '.')]
+# 앱 아이콘(.ico, 창/exe)과 로고 PNG(트레이·헤더 로고)를 번들 루트에 넣는다.
+datas += [('gendisk.ico', '.'), ('logo/gendisk-icon.png', '.')]
 
 # customtkinter 는 테마 JSON·폰트 등 데이터 파일을 함께 번들해야 실행된다.
 # darkdetect 는 시스템 다크/라이트 감지에 쓰인다.
