@@ -9,10 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .auth import Credentials, hash_password, require_admin
-from .database import FILES_DIR, get_db
+from .database import FILES_DIR, delete_setting, get_db, get_setting, set_setting
 from .files import dir_size, list_mounts
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+SERVERINFO_KEY = "serverinfo_token"
 
 
 @router.get("/users")
@@ -267,3 +269,26 @@ def grant_mount(body: GrantMount, admin: dict = Depends(require_admin)):
     finally:
         conn.close()
     return {"ok": True, "user_ids": requested}
+
+
+# ---------- Homepage 위젯 serverinfo 토큰 ----------
+
+@router.get("/serverinfo")
+def get_serverinfo_token(admin: dict = Depends(require_admin)):
+    """저장된 위젯 토큰(없으면 null)."""
+    return {"token": get_setting(SERVERINFO_KEY)}
+
+
+@router.post("/serverinfo/generate")
+def generate_serverinfo_token(admin: dict = Depends(require_admin)):
+    """새 토큰을 생성·저장하고 돌려준다."""
+    token = secrets.token_urlsafe(24)
+    set_setting(SERVERINFO_KEY, token)
+    return {"token": token}
+
+
+@router.post("/serverinfo/clear")
+def clear_serverinfo_token(admin: dict = Depends(require_admin)):
+    """저장된 토큰 삭제 (토큰 인증 비활성화, 관리자 Basic 은 계속 동작)."""
+    delete_setting(SERVERINFO_KEY)
+    return {"ok": True}

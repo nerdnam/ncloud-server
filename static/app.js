@@ -1060,6 +1060,42 @@ $("admin-btn").addEventListener("click", () => {
   $("admin-error").textContent = "";
   $("admin-modal").classList.remove("hidden");
   loadUsers();
+  loadServerinfoToken();
+});
+
+/* ---------- Homepage 위젯 토큰 (관리자) ---------- */
+async function loadServerinfoToken() {
+  try {
+    const data = await api("/api/admin/serverinfo");
+    $("serverinfo-token").value = data.token || "";
+  } catch (err) {
+    /* 토큰 조회 실패는 사용자 목록 오류와 섞지 않는다 */
+  }
+}
+
+$("serverinfo-gen").addEventListener("click", async () => {
+  try {
+    const data = await postJSON("/api/admin/serverinfo/generate", {});
+    $("serverinfo-token").value = data.token;
+  } catch (err) {
+    $("admin-error").textContent = err.message;
+  }
+});
+
+$("serverinfo-clear").addEventListener("click", async () => {
+  if (!$("serverinfo-token").value) return;
+  if (!confirm("위젯 토큰을 삭제할까요? 이 토큰으로는 더 이상 접근할 수 없습니다.")) return;
+  try {
+    await postJSON("/api/admin/serverinfo/clear", {});
+    $("serverinfo-token").value = "";
+  } catch (err) {
+    $("admin-error").textContent = err.message;
+  }
+});
+
+$("serverinfo-copy").addEventListener("click", () => {
+  const v = $("serverinfo-token").value;
+  if (v) copyText(v, $("serverinfo-copy"));
 });
 
 async function loadUsers() {

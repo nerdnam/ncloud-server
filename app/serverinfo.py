@@ -24,11 +24,17 @@ from fastapi import APIRouter, HTTPException, Request
 
 from . import files as files_mod
 from .auth import verify_basic_auth
-from .database import DATA_DIR, FILES_DIR, get_db
+from .database import DATA_DIR, FILES_DIR, get_db, get_setting
 
 router = APIRouter(tags=["serverinfo"])
 
-SERVERINFO_TOKEN = os.environ.get("GENDISK_SERVERINFO_TOKEN", "")
+# 환경변수 토큰(선택). 관리자 웹 UI 에서 설정한 DB 토큰이 우선.
+ENV_TOKEN = os.environ.get("GENDISK_SERVERINFO_TOKEN", "")
+
+
+def _configured_token() -> str:
+    """유효한 위젯 토큰 — 웹 UI(관리자 설정) 저장값 우선, 없으면 환경변수."""
+    return get_setting("serverinfo_token") or ENV_TOKEN
 
 # 파일 수는 전체 트리를 훑어야 하므로 캐시(폴링마다 재계산하지 않도록).
 _FILES_TTL = 300.0
@@ -37,10 +43,11 @@ _files_cache = {"at": 0.0, "n": 0}
 
 def _authorized(request: Request) -> bool:
     """NC-Token(설정 토큰) 또는 관리자 Basic 인증이면 허용."""
+    configured = _configured_token()
     token = request.headers.get("NC-Token")
     # 바이트로 비교 (compare_digest 는 비-ASCII str 에 TypeError → 헤더에 유니코드가 와도 안전하게 실패)
-    if SERVERINFO_TOKEN and token and secrets.compare_digest(
-            token.encode("utf-8"), SERVERINFO_TOKEN.encode("utf-8")):
+    if configured and token and secrets.compare_digest(
+            token.encode("utf-8"), configured.encode("utf-8")):
         return True
     user = verify_basic_auth(request.headers.get("Authorization"))
     return bool(user and user["is_admin"])

@@ -149,6 +149,18 @@
       <button type="submit" class="btn primary">추가</button>
     </form>
     <p id="admin-error" class="auth-error"></p>
+
+    <h3>Homepage 위젯 토큰</h3>
+    <p class="qr-desc">Homepage 대시보드의 <code>nextcloud</code> 위젯에서 이 서버를 띄울 때 쓰는 토큰입니다. 위젯의 <code>key</code>에 넣으세요. (미설정 시 관리자 아이디/비밀번호로도 가능)</p>
+    <div class="share-link-row">
+      <input type="text" id="serverinfo-token" readonly placeholder="아직 생성되지 않음">
+      <button type="button" id="serverinfo-copy" class="btn">복사</button>
+    </div>
+    <div class="modal-actions" style="justify-content: flex-start;">
+      <button type="button" id="serverinfo-gen" class="btn primary">생성 / 재생성</button>
+      <button type="button" id="serverinfo-clear" class="btn subtle del">삭제</button>
+    </div>
+
     <div class="modal-actions">
       <button type="button" class="btn" data-close>닫기</button>
     </div>

@@ -272,12 +272,9 @@ Authorization: Bearer <session_token>
 
 [Homepage](https://gethomepage.dev)의 **Nextcloud 위젯**과 호환되는 `serverinfo` API를 제공하므로, Homepage 대시보드에 GenDisk를 그대로 띄울 수 있습니다 (CPU 부하·메모리·여유 공간·파일 수·공유 수·활성 사용자).
 
-**1. 토큰 설정** — compose.yaml 의 `environment` 에 임의의 토큰을 넣습니다:
+**1. 토큰 생성** — 웹 UI에서 **관리자 → 👥 사용자 관리 → "Homepage 위젯 토큰" → 생성**을 눌러 토큰을 만들고 복사합니다. (DB에 저장됩니다)
 
-```yaml
-    environment:
-      - GENDISK_SERVERINFO_TOKEN=원하는_랜덤_문자열
-```
+> 도커 환경변수 `GENDISK_SERVERINFO_TOKEN` 으로 지정해도 됩니다. 웹 UI에서 만든 토큰이 있으면 그쪽이 우선합니다.
 
 **2. Homepage 위젯 등록** — `services.yaml` 에 `nextcloud` 위젯으로 추가:
 

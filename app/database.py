@@ -99,6 +99,11 @@ def init_db() -> None:
                 is_dir INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_share_items_token ON share_items(share_token);
+            CREATE TABLE IF NOT EXISTS settings (
+                -- 관리자 설정 키-값 (예: Homepage 위젯 serverinfo 토큰)
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
         # 구버전 DB 마이그레이션: 누락된 컬럼 추가, 첫 사용자를 관리자로 승격
@@ -121,6 +126,39 @@ def init_db() -> None:
             conn.execute(
                 "UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)"
             )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------- 설정 키-값 (관리자 설정) ----------
+
+def get_setting(key: str) -> str | None:
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    finally:
+        conn.close()
+    return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_setting(key: str) -> None:
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM settings WHERE key = ?", (key,))
         conn.commit()
     finally:
         conn.close()
