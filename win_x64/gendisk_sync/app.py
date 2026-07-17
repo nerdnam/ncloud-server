@@ -167,6 +167,13 @@ class App:
         return ctk.CTkLabel(parent, text=text, font=self.font_s, text_color=MUTED,
                             anchor="w", **kw)
 
+    def _logo(self, parent):
+        """헤더 로고: genDISK G 마크 아이콘 + 'genDISK' 텍스트 (안드로이드 앱과 동일)."""
+        img = render_icon(64)  # 고해상도로 렌더 → CTkImage 가 표시 크기로 축소(HiDPI 대응)
+        logo = ctk.CTkImage(light_image=img, dark_image=img, size=(28, 28))
+        return ctk.CTkLabel(parent, image=logo, text="  genDISK",
+                            font=self.font_title, compound="left")
+
     def _build_ui(self):
         self.font_title = ctk.CTkFont(family="Segoe UI", size=22, weight="bold")
         self.font_h = ctk.CTkFont(family="Segoe UI", size=14, weight="bold")
@@ -203,7 +210,7 @@ class App:
         pad = ctk.CTkFrame(card, fg_color="transparent")
         pad.pack(padx=32, pady=28)
 
-        ctk.CTkLabel(pad, text="☁  genDISK", font=self.font_title).pack()
+        self._logo(pad).pack()
         ctk.CTkLabel(pad, text="로그인하고 파일을 동기화·연결하세요",
                      font=self.font_s, text_color=MUTED).pack(pady=(2, 18))
 
@@ -241,7 +248,7 @@ class App:
 
         header = ctk.CTkFrame(frame, fg_color="transparent")
         header.pack(fill="x", padx=22, pady=(18, 6))
-        ctk.CTkLabel(header, text="☁  genDISK", font=self.font_title).pack(side="left")
+        self._logo(header).pack(side="left")
         ctk.CTkButton(header, text="로그아웃", width=88, command=self._logout,
                       fg_color="transparent", border_width=1,
                       text_color=DANGER, hover_color=("gray90", "gray25")).pack(side="right")
