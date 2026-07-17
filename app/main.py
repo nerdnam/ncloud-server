@@ -1,8 +1,9 @@
 """genDISK — self-hosted personal cloud storage (gendisk.cloud)."""
+import hashlib
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import admin, auth, files, serverinfo, shares, sync
@@ -32,15 +33,39 @@ app.add_route("/dav/{path:path}", webdav_endpoint, methods=DAV_METHODS)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+def _asset_version() -> str:
+    """정적 JS/CSS 내용 기반 버전. 파일이 바뀌면 값도 바뀌어 브라우저·CDN(Cloudflare)
+    캐시를 무효화한다. 컨테이너 수명 동안 파일은 고정이라 시작 시 한 번만 계산한다."""
+    h = hashlib.sha1()
+    for name in ("style.css", "app.js", "share.js"):
+        try:
+            h.update((STATIC_DIR / name).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:8]
+
+
+_ASSET_VERSION = _asset_version()
+
+
+def _serve_html(name: str) -> HTMLResponse:
+    """HTML 을 서빙하며 정적 참조에 ?v=<버전> 을 붙인다(캐시 버스팅).
+    HTML 자체는 no-cache 로 항상 재검증되게 해, 배포 후 새 JS/CSS 를 확실히 받게 한다."""
+    html = (STATIC_DIR / name).read_text(encoding="utf-8")
+    for asset in ("style.css", "app.js", "share.js"):
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={_ASSET_VERSION}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return _serve_html("index.html")
 
 
 @app.get("/s/{token}", include_in_schema=False)
 def share_page(token: str):
     """외부 공유 링크의 공개 열람 페이지. 실제 검증/열람은 페이지 JS가 API로 수행."""
-    return FileResponse(STATIC_DIR / "share.html")
+    return _serve_html("share.html")
 
 
 def _win_client_path():
