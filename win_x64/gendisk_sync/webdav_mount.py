@@ -125,3 +125,52 @@ def disconnect_drive(drive: str):
     err = _mpr().WNetCancelConnection2W(drive, CONNECT_UPDATE_PROFILE, True)
     if err not in (0, _ERROR_NOT_CONNECTED):
         raise RuntimeError(f"연결 해제 실패 (코드 {err}: {ctypes.FormatError(err).strip()})")
+
+
+def cleanup_stale_webdav(drive: str = "", server_url: str = "") -> list[str]:
+    """끊긴/잔여 WebDAV 드라이브·네트워크 위치를 정리한다. 정리한 항목 설명 목록을 반환.
+
+    - drive 문자 매핑 해제(persistent 포함)
+    - 탐색기 MountPoints2 의 이 앱 WebDAV 잔여(##...#dav) 제거
+      (RaiDrive 등 다른 프로그램의 #WebDAV 항목은 건드리지 않음)
+    """
+    import winreg
+    removed = []
+    if drive:
+        try:
+            _mpr().WNetCancelConnection2W(drive.rstrip("\\"), CONNECT_UPDATE_PROFILE, True)
+            removed.append(f"{drive} 드라이브 매핑 해제")
+        except Exception:
+            pass
+    host = (urlsplit(server_url).hostname or "").lower() if server_url else ""
+    mp = r"Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2"
+    try:
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, mp, 0,
+                           winreg.KEY_READ | winreg.KEY_WRITE)
+        subs = []
+        i = 0
+        while True:
+            try:
+                subs.append(winreg.EnumKey(k, i))
+                i += 1
+            except OSError:
+                break
+        for s in subs:
+            low = s.lower()
+            # 이 앱이 만든 WebDAV( \\host@SSL\dav → ##host@SSL#dav )만 타겟.
+            # 서버 host 를 알면 그 host 것만, 모르면 #dav 로 끝나는 것 전부.
+            is_ours = low.endswith("#dav") and (not host or host in low)
+            if is_ours:
+                try:
+                    winreg.DeleteKey(k, s)
+                    removed.append(f"네트워크 위치 제거: {s}")
+                except OSError:
+                    pass
+        winreg.CloseKey(k)
+    except FileNotFoundError:
+        pass
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+    except Exception:
+        pass
+    return removed

@@ -18,7 +18,8 @@ from .drive import DriveController
 from .engine import SyncEngine
 from .icon import icon_path, render_icon
 from .webdav_mount import (
-    connect_drive, disconnect_drive, start_webclient_elevated, webclient_running)
+    cleanup_stale_webdav, connect_drive, disconnect_drive,
+    start_webclient_elevated, webclient_running)
 
 # macOS 시스템 강조색 (라이트/다크). accent 버튼에 사용.
 ACCENT = ("#007AFF", "#0A84FF")
@@ -83,8 +84,8 @@ class App:
         self._pw = self.cfg.get_password()
         self.root = ctk.CTk()
         self.root.title("genDISK")
-        self.root.geometry("560x820")
-        self.root.minsize(520, 640)
+        self.root.geometry("1120x772")   # 2열 배치 — 스크롤 없이 콘텐츠가 맞는 높이
+        self.root.minsize(980, 700)
         self._apply_window_icon()
         self._build_ui()
         self.worker = SyncWorker(self)
@@ -269,37 +270,26 @@ class App:
                       fg_color="transparent", border_width=1,
                       text_color=DANGER, hover_color=("gray90", "gray25")).pack(side="right")
 
-        body = ctk.CTkScrollableFrame(frame, fg_color="transparent")
+        # 스크롤 없는 일반 프레임 — 창 높이가 콘텐츠에 맞춰 스크롤바가 안 나온다.
+        body = ctk.CTkFrame(frame, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        body.grid_columnconfigure(0, weight=1, uniform="col")
+        body.grid_columnconfigure(1, weight=1, uniform="col")
+        left = ctk.CTkFrame(body, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="new", padx=(0, 8))
+        right = ctk.CTkFrame(body, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="new", padx=(8, 0))
 
+        # ══════ 왼쪽 열 ══════
         # ── 계정 ──
-        c = self._card(body, "계정")
+        c = self._card(left, "계정")
         self.lbl_acc_server = self._field_label(c, "")
         self.lbl_acc_server.pack(fill="x")
         self.lbl_acc_user = self._field_label(c, "")
         self.lbl_acc_user.pack(fill="x", pady=(2, 0))
 
-        # ── 시작 옵션 ──
-        c = self._card(body, "시작 옵션")
-        self.var_autostart = tk.BooleanVar(value=self.cfg.auto_start)
-        self.var_autologin = tk.BooleanVar(value=self.cfg.auto_login)
-        self.var_autodrive = tk.BooleanVar(value=self.cfg.auto_connect_drive)
-        ctk.CTkSwitch(c, text="Windows 시작 시 자동 실행", variable=self.var_autostart,
-                      command=self._apply_autostart).pack(anchor="w", pady=6)
-        ctk.CTkSwitch(c, text="프로그램 시작 시 자동 로그인", variable=self.var_autologin).pack(
-            anchor="w", pady=6)
-        ctk.CTkSwitch(c, text="자동 로그인 후 드라이브 자동 연결", variable=self.var_autodrive).pack(
-            anchor="w", pady=6)
-
-        # ── 화면 테마 ──
-        c = self._card(body, "화면 테마")
-        self.seg_theme = ctk.CTkSegmentedButton(
-            c, values=list(_THEME_LABELS.values()), command=self._on_theme_change)
-        self.seg_theme.set(_THEME_LABELS.get(self.cfg.appearance, "자동"))
-        self.seg_theme.pack(fill="x")
-
         # ── 동기화 ──
-        c = self._card(body, "동기화")
+        c = self._card(left, "동기화")
         self._field_label(c, "동기화할 저장소").pack(fill="x")
         self.cmb_space = ctk.CTkOptionMenu(c, values=["home"])
         self.cmb_space.set(self.cfg.space); self.cmb_space.pack(fill="x", pady=(2, 10))
@@ -328,8 +318,8 @@ class App:
         ctk.CTkButton(brow, text="지금 동기화", width=110, command=self._sync_now,
                       fg_color=ACCENT, hover_color=ACCENT_HOVER).pack(side="left", padx=(8, 0))
 
-        # ── 드라이브 연결 ──
-        c = self._card(body, "드라이브 연결 (WebDAV)")
+        # ── 드라이브 연결 (WebDAV) ──
+        c = self._card(left, "드라이브 연결 (WebDAV)")
         self._field_label(c, "일반 디스크처럼 사용 — 파일 탐색기에 드라이브로 연결합니다.").pack(fill="x")
         drow = ctk.CTkFrame(c, fg_color="transparent"); drow.pack(fill="x", pady=(8, 8))
         self._field_label(drow, "드라이브 문자").pack(side="left")
@@ -343,9 +333,32 @@ class App:
         ctk.CTkButton(c, text="Windows WebClient 서비스 켜기", command=self._start_webclient,
                       fg_color="transparent", border_width=1,
                       text_color=ACCENT, hover_color=("gray90", "gray25")).pack(fill="x")
+        ctk.CTkButton(c, text="🧹 끊긴 WebDAV 연결 정리", command=self._cleanup_webdav,
+                      fg_color="transparent", border_width=1,
+                      text_color=MUTED, hover_color=("gray90", "gray25")).pack(fill="x", pady=(6, 0))
+
+        # ══════ 오른쪽 열 ══════
+        # ── 시작 옵션 ──
+        c = self._card(right, "시작 옵션")
+        self.var_autostart = tk.BooleanVar(value=self.cfg.auto_start)
+        self.var_autologin = tk.BooleanVar(value=self.cfg.auto_login)
+        self.var_autodrive = tk.BooleanVar(value=self.cfg.auto_connect_drive)
+        ctk.CTkSwitch(c, text="Windows 시작 시 자동 실행", variable=self.var_autostart,
+                      command=self._apply_autostart).pack(anchor="w", pady=6)
+        ctk.CTkSwitch(c, text="프로그램 시작 시 자동 로그인", variable=self.var_autologin).pack(
+            anchor="w", pady=6)
+        ctk.CTkSwitch(c, text="자동 로그인 후 드라이브 자동 연결", variable=self.var_autodrive).pack(
+            anchor="w", pady=6)
+
+        # ── 화면 테마 ──
+        c = self._card(right, "화면 테마")
+        self.seg_theme = ctk.CTkSegmentedButton(
+            c, values=list(_THEME_LABELS.values()), command=self._on_theme_change)
+        self.seg_theme.set(_THEME_LABELS.get(self.cfg.appearance, "자동"))
+        self.seg_theme.pack(fill="x")
 
         # ── genDISK Drive (온디맨드 클라우드) ──
-        c = self._card(body, "genDISK Drive (온디맨드)")
+        c = self._card(right, "genDISK Drive (온디맨드)")
         self._field_label(
             c, "iCloud처럼 탐색기 사이드바에 genDISK 드라이브로 나타납니다.\n"
                "파일은 목록만 먼저 보이고, 열 때 자동으로 내려받습니다(온디맨드).").pack(fill="x")
@@ -354,7 +367,7 @@ class App:
                       command=self._toggle_vfs).pack(anchor="w", pady=(8, 0))
 
         # ── 상태 & 로그 ──
-        c = self._card(body, "상태")
+        c = self._card(right, "상태")
         self.lbl_status = ctk.CTkLabel(c, text="대기 중", font=self.font_s,
                                        text_color=MUTED, anchor="w")
         self.lbl_status.pack(fill="x", pady=(0, 6))
@@ -633,6 +646,34 @@ class App:
             self.log(f"{self.cmb_drive.get()} 연결을 해제했습니다.")
         except Exception as e:
             messagebox.showerror("연결 해제 실패", str(e))
+
+    def _cleanup_webdav(self):
+        """끊긴 WebDAV 드라이브/네트워크 위치 잔여를 제거하고, 자동 연결을 끈다."""
+        if not messagebox.askyesno(
+                "끊긴 WebDAV 연결 정리",
+                "탐색기에 남은 끊긴 WebDAV 네트워크 드라이브(빨간 X)와 잔여 항목을 제거합니다.\n"
+                "'자동 로그인 후 드라이브 자동 연결'도 함께 끕니다.\n"
+                "(genDISK Drive 온디맨드 기능에는 영향 없음)\n\n계속할까요?"):
+            return
+        try:
+            removed = cleanup_stale_webdav(self.cmb_drive.get() or self.cfg.drive_letter,
+                                           self.cfg.server_url)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("정리 실패", str(e))
+            return
+        # 재발 방지: 자동 드라이브 연결 끄기
+        self.cfg.auto_connect_drive = False
+        self.var_autodrive.set(False)
+        self.cfg.save()
+        if removed:
+            self.log("WebDAV 정리: " + ", ".join(removed))
+            messagebox.showinfo(
+                "정리 완료",
+                "정리했습니다:\n\n· " + "\n· ".join(removed) +
+                "\n\n'자동 드라이브 연결'도 껐습니다.\n탐색기를 새로 열면 사라집니다.")
+        else:
+            messagebox.showinfo("정리", "제거할 끊긴 WebDAV 항목이 없습니다.\n"
+                                        "('자동 드라이브 연결'은 껐습니다.)")
 
     # ---------- 상태/로그 (스레드 안전) ----------
     def set_status(self, text, color=MUTED):
