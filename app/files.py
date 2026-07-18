@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
@@ -245,8 +245,11 @@ async def upload(
     files: list[UploadFile],
     path: str = "",
     space: str = HOME_SPACE,
+    paths: list[str] | None = Form(None),
     user: dict = Depends(current_user),
 ):
+    """파일 업로드. paths[i] 가 있으면 그 상대경로(하위폴더 포함)를 보존한다(폴더 업로드).
+    없으면 파일명만 사용(일반 파일 업로드)."""
     target_dir = safe_path(user, path, space)
     if not target_dir.is_dir():
         raise HTTPException(404, "폴더를 찾을 수 없습니다")
@@ -262,15 +265,31 @@ async def upload(
         used = await run_in_threadpool(dir_size, user_root(user)) if quota > 0 else 0
 
         saved = []
-        for f in files:
-            name = Path(f.filename or "unnamed").name  # strip any client-sent dirs
-            if not name or name in (".", ".."):
+        made_dirs: set[Path] = set()
+        for i, f in enumerate(files):
+            # 클라이언트가 준 상대경로(폴더 업로드) 또는 파일명. traversal 성분(.. 등)은 제거.
+            rel = (paths[i] if paths and i < len(paths) else "") or (f.filename or "")
+            parts = [p for p in rel.replace("\\", "/").split("/")
+                     if p and p not in (".", "..")]
+            if not parts:
                 continue
-            dest = target_dir / name
+            name = parts[-1]
+            subdir = "/".join(parts[:-1])
+            try:
+                if subdir:
+                    base_dir = safe_path(user, f"{path}/{subdir}", space)
+                    if base_dir not in made_dirs:
+                        base_dir.mkdir(parents=True, exist_ok=True)
+                        made_dirs.add(base_dir)
+                else:
+                    base_dir = target_dir
+            except OSError as exc:
+                raise _fs_error(exc)
+            dest = base_dir / name
             # avoid overwriting: append (1), (2), ...
             counter = 1
             while dest.exists():
-                dest = target_dir / f"{Path(name).stem} ({counter}){Path(name).suffix}"
+                dest = base_dir / f"{Path(name).stem} ({counter}){Path(name).suffix}"
                 counter += 1
             try:
                 # 스트리밍으로 저장하면서 실시간으로 용량 제한을 확인한다
@@ -294,7 +313,7 @@ async def upload(
                 dest.unlink(missing_ok=True)
                 raise _fs_error(exc)
             used += written
-            saved.append(dest.name)
+            saved.append(dest.relative_to(target_dir).as_posix())
     return {"saved": saved}
 
 

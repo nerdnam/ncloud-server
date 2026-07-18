@@ -843,17 +843,35 @@ $("file-input").addEventListener("change", (e) => {
   uploadFiles(e.target.files);
   e.target.value = "";
 });
+$("upload-folder-btn").addEventListener("click", () => $("folder-input").click());
+$("folder-input").addEventListener("change", (e) => {
+  uploadFiles(e.target.files);   // 각 File 의 webkitRelativePath 로 하위 구조 유지
+  e.target.value = "";
+});
 
-async function uploadFiles(fileList) {
-  if (!fileList.length) return;
+// items: FileList/File[] (각 File 이 webkitRelativePath 를 가질 수 있음) 또는 {file,path}[]
+async function uploadFiles(items) {
+  const entries = [];
+  for (const it of items) {
+    if (it instanceof File) entries.push({ file: it, path: it.webkitRelativePath || it.name });
+    else if (it && it.file) entries.push(it);
+  }
+  if (!entries.length) return;
   if (isReadonly()) {
     alert("읽기 전용 저장소에는 업로드할 수 없습니다");
     return;
   }
   const form = new FormData();
-  for (const f of fileList) form.append("files", f);
+  for (const { file, path } of entries) {
+    form.append("files", file, file.name);
+    form.append("paths", path);          // 상대경로(하위폴더 포함) — 서버가 구조 보존
+  }
   const status = $("upload-status");
-  status.textContent = `⬆ ${fileList.length}개 파일 업로드 중...`;
+  const folders = new Set(
+    entries.map((e) => e.path.split("/").slice(0, -1).join("/")).filter(Boolean));
+  status.textContent = folders.size
+    ? `⬆ ${entries.length}개 파일 (폴더 ${folders.size}개) 업로드 중...`
+    : `⬆ ${entries.length}개 파일 업로드 중...`;
   status.classList.remove("hidden");
   try {
     await api(fileUrl("upload", currentPath), { method: "POST", body: form });
@@ -866,7 +884,33 @@ async function uploadFiles(fileList) {
   }
 }
 
-/* 드래그 앤 드롭 */
+/* 드롭된 파일/폴더 엔트리를 재귀적으로 읽어 {file, path} 목록으로 만든다 */
+async function walkEntries(roots) {
+  const out = [];
+  for (const entry of roots) await walkEntry(entry, "", out);
+  return out;
+}
+function walkEntry(entry, prefix, out) {
+  return new Promise((resolve) => {
+    if (entry.isFile) {
+      entry.file(
+        (f) => { out.push({ file: f, path: prefix + entry.name }); resolve(); },
+        () => resolve());
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const readBatch = () => reader.readEntries(async (ents) => {
+        if (!ents.length) { resolve(); return; }   // 더 없으면 종료
+        for (const e of ents) await walkEntry(e, prefix + entry.name + "/", out);
+        readBatch();                                // readEntries 는 배치로 반환 → 반복
+      }, () => resolve());
+      readBatch();
+    } else {
+      resolve();
+    }
+  });
+}
+
+/* 드래그 앤 드롭 (폴더 포함) */
 let dragDepth = 0;
 document.addEventListener("dragenter", (e) => {
   e.preventDefault();
@@ -886,8 +930,20 @@ document.addEventListener("drop", (e) => {
   e.preventDefault();
   dragDepth = 0;
   document.body.classList.remove("dragging");
-  if (!$("app-screen").classList.contains("hidden")) {
-    uploadFiles(e.dataTransfer.files);
+  if ($("app-screen").classList.contains("hidden")) return;
+  // webkitGetAsEntry 는 이벤트 핸들러 안에서 동기적으로 호출해야 유효하다.
+  const items = e.dataTransfer.items;
+  const roots = [];
+  if (items && items.length) {
+    for (let i = 0; i < items.length; i++) {
+      const entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+      if (entry) roots.push(entry);
+    }
+  }
+  if (roots.length) {
+    walkEntries(roots).then((list) => uploadFiles(list));   // 폴더 구조 유지
+  } else {
+    uploadFiles(e.dataTransfer.files);                      // 폴백: 평면 파일
   }
 });
 
