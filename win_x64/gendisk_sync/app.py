@@ -8,11 +8,13 @@ customtkinter로 macOS 스타일(둥근 카드·토글 스위치·플랫 강조 
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from urllib.parse import urlsplit
 
 import customtkinter as ctk
 
 from . import autostart, single_instance
-from .client import ApiError, AuthError, GenDiskClient, webdav_preflight
+from .client import (
+    ApiError, AuthError, GenDiskClient, webdav_preflight, webdav_preflight_url)
 from .config import Config
 from .drive import DriveController
 from .engine import SyncEngine
@@ -261,8 +263,17 @@ class App:
         pad.pack(padx=32, pady=28)
 
         self._logo(pad).pack()
-        ctk.CTkLabel(pad, text="로그인하고 파일을 동기화·연결하세요",
-                     font=self.font_s, text_color=MUTED).pack(pady=(2, 18))
+        self.lbl_login_subtitle = ctk.CTkLabel(
+            pad, text="로그인하고 파일을 동기화·연결하세요",
+            font=self.font_s, text_color=MUTED)
+        self.lbl_login_subtitle.pack(pady=(2, 14))
+
+        # 접속 모드 토글 (안드로이드와 동일): genDISK 계정 로그인 / 일반 WebDAV 드라이브 연결
+        self._login_mode = "genDISK"
+        self.seg_login_mode = ctk.CTkSegmentedButton(
+            pad, width=320, values=["genDISK", "WebDAV"], command=self._on_login_mode)
+        self.seg_login_mode.set("genDISK")
+        self.seg_login_mode.pack(pady=(0, 14))
 
         self.e_url = ctk.CTkEntry(pad, width=320,
                                   placeholder_text="서버 주소 (예: https://gendisk.cloud)")
@@ -277,20 +288,60 @@ class App:
         self.e_pw.pack(pady=4)
         if self.cfg.get_password():
             self.e_pw.insert(0, self.cfg.get_password())
-        self.e_pw.bind("<Return>", lambda e: self._login())
+        self.e_pw.bind("<Return>", lambda e: self._login_submit())
+
+        # WebDAV 모드에서만 보이는 드라이브 문자 선택 (기본 숨김)
+        self.frm_login_drive = ctk.CTkFrame(pad, fg_color="transparent")
+        self._field_label(self.frm_login_drive, "드라이브 문자").pack(side="left")
+        self.cmb_login_drive = ctk.CTkOptionMenu(
+            self.frm_login_drive, width=90,
+            values=[f"{ch}:" for ch in "DEFGHIJKLMNOPQRSTUVWXYZ"])
+        self.cmb_login_drive.set("W:")
+        self.cmb_login_drive.pack(side="left", padx=(10, 0))
 
         self.var_savecred = tk.BooleanVar(value=self.cfg.save_credentials)
-        ctk.CTkSwitch(pad, text="로그인 정보 저장 (암호화)",
-                      variable=self.var_savecred).pack(anchor="w", pady=(10, 0))
+        self.sw_savecred = ctk.CTkSwitch(pad, text="로그인 정보 저장 (암호화)",
+                                         variable=self.var_savecred)
+        self.sw_savecred.pack(anchor="w", pady=(10, 0))
 
         self.lbl_login_error = ctk.CTkLabel(pad, text="", font=self.font_s,
                                             text_color=DANGER, wraplength=320)
         self.lbl_login_error.pack(pady=(8, 0))
 
-        self.btn_login = ctk.CTkButton(pad, text="로그인", width=320, command=self._login,
+        self.btn_login = ctk.CTkButton(pad, text="로그인", width=320,
+                                       command=self._login_submit,
                                        fg_color=ACCENT, hover_color=ACCENT_HOVER)
         self.btn_login.pack(pady=(8, 0))
         return frame
+
+    def _on_login_mode(self, mode):
+        """로그인 화면 모드 전환(genDISK ↔ WebDAV)."""
+        self._login_mode = mode
+        self.lbl_login_error.configure(text="")
+        cur = self.e_url.get().strip()
+        if mode == "WebDAV":
+            # genDISK 주소가 그대로 프리필돼 있으면 비워서 WebDAV placeholder 안내가 보이게 한다.
+            if cur == (self.cfg.server_url or ""):
+                self.e_url.delete(0, "end")
+            self.lbl_login_subtitle.configure(text="WebDAV 서버를 드라이브로 연결합니다")
+            self.e_url.configure(placeholder_text="WebDAV 주소 (예: https://호스트:포트/dav)")
+            self.frm_login_drive.pack(fill="x", pady=(8, 0), before=self.sw_savecred)
+            self.btn_login.configure(text="연결")
+        else:
+            # WebDAV 로 비웠던 경우 genDISK 주소를 되살린다.
+            if not cur and self.cfg.server_url:
+                self.e_url.insert(0, self.cfg.server_url)
+            self.lbl_login_subtitle.configure(text="로그인하고 파일을 동기화·연결하세요")
+            self.e_url.configure(placeholder_text="서버 주소 (예: https://gendisk.cloud)")
+            self.frm_login_drive.pack_forget()
+            self.btn_login.configure(text="로그인")
+
+    def _login_submit(self):
+        """기본 버튼/Enter 처리 — 로그인 화면 모드에 따라 분기."""
+        if self._login_mode == "WebDAV":
+            self._webdav_login()
+        else:
+            self._login()
 
     # ---------- 설정 화면 (로그인 후) ----------
     def _build_settings(self, parent):
@@ -445,6 +496,79 @@ class App:
             self.lbl_login_error.configure(text=str(e))
         except (ApiError, OSError) as e:
             self.lbl_login_error.configure(text=str(e))
+
+    def _webdav_login(self):
+        """로그인 화면 WebDAV 모드: 임의 WebDAV 서버를 드라이브로 연결한다.
+        성공하면 연결을 목록에 저장하고 관리 창을 연다 (탐색기가 곧 파일 브라우저)."""
+        url = self.e_url.get().strip()
+        user = self.e_user.get().strip()
+        pw = self.e_pw.get()
+        drive = self.cmb_login_drive.get()
+        if not url or not user or not pw:
+            self.lbl_login_error.configure(text="주소·아이디·비밀번호를 모두 입력하세요.")
+            return
+        if "://" not in url:
+            url = "https://" + url
+        url = url.rstrip("/")
+        if url.lower().startswith("http://") and not messagebox.askyesno(
+                "보안 경고",
+                "http(암호화 안 됨) 주소입니다. 비밀번호가 평문으로 전송될 수 있고\n"
+                "Windows도 기본적으로 http WebDAV의 Basic 인증을 막습니다.\n\n계속할까요?"):
+            return
+        self.lbl_login_error.configure(text="")
+        self.cfg.save_credentials = self.var_savecred.get()
+        self.btn_login.configure(state="disabled", text="연결 중…")
+
+        def work():
+            try:
+                connect_url(drive, url, user, pw)
+            except Exception as e:  # noqa: BLE001
+                err = str(e)
+                diag = ""
+                try:
+                    webdav_preflight_url(url, user, pw)
+                except RuntimeError as pe:
+                    diag = "\n" + str(pe)
+                except Exception:
+                    pass
+                if not diag and not webclient_running():
+                    diag = "\nWindows 'WebClient' 서비스가 꺼져 있을 수 있습니다."
+                self.root.after(0, lambda: self._webdav_login_done(
+                    False, err + diag, url, user, pw, drive))
+                return
+            self.root.after(0, lambda: self._webdav_login_done(True, "", url, user, pw, drive))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _webdav_login_done(self, ok, err, url, user, pw, drive):
+        self.btn_login.configure(state="normal", text="연결")
+        if not ok:
+            self.lbl_login_error.configure(text=err)
+            return
+        self._save_webdav_mount(url, user, pw, drive)
+        self.log(f"[WebDAV] {drive} 드라이브로 연결했습니다: {url}")
+        messagebox.showinfo(
+            "연결됨", f"{drive} 드라이브로 연결했습니다.\n탐색기에서 확인하세요.")
+        self._open_webdav_manager(collect=False)
+
+    def _save_webdav_mount(self, url, user, pw, drive):
+        """방금 연결한 WebDAV 를 저장 목록에 추가/갱신(같은 url+drive 는 갱신)."""
+        from . import secret
+        enc = secret.encrypt(pw) or "" if self.var_savecred.get() else ""
+        name = urlsplit(url).hostname or url
+        for m in self.cfg.webdav_mounts:
+            if m.get("url") == url and m.get("drive") == drive:
+                m["username"] = user
+                m["password_enc"] = enc
+                if not m.get("name"):
+                    m["name"] = name
+                self.cfg.save()
+                return
+        self.cfg.webdav_mounts.append({
+            "name": name, "url": url, "username": user,
+            "password_enc": enc, "drive": drive, "auto": False,
+        })
+        self.cfg.save()
 
     def _logout(self):
         """세션을 지우고 로그인 화면으로. 명시적 로그아웃이므로 자동 로그인/저장 비번도 끈다.
@@ -683,9 +807,11 @@ class App:
         except Exception as e:
             messagebox.showerror("연결 해제 실패", str(e))
 
-    def _open_webdav_manager(self):
-        """일반(범용) WebDAV 서버 연결 관리 창을 연다."""
-        self._collect()   # 현재 화면 값 반영 (그래야 관리자에서 cfg.save 시 유실 없음)
+    def _open_webdav_manager(self, collect: bool = True):
+        """일반(범용) WebDAV 서버 연결 관리 창을 연다.
+        collect=False 는 로그인 화면에서 열 때(설정 위젯 값 수집 불필요)."""
+        if collect:
+            self._collect()   # 설정 화면 값 반영 (그래야 관리자에서 cfg.save 시 유실 없음)
         try:
             win = getattr(self, "_webdav_win", None)
             if win is not None and win.winfo_exists():
