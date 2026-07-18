@@ -843,11 +843,43 @@ $("file-input").addEventListener("change", (e) => {
   uploadFiles(e.target.files);
   e.target.value = "";
 });
+// ── 다중 폴더 업로드 ──
+// webkitdirectory 선택기는 한 번에 폴더 하나만 고른다. 여러 폴더를 올리려면
+// 고른 폴더들을 대기열(tray)에 쌓아 두었다가 한꺼번에 업로드한다.
+// (드래그 앤 드롭은 한 번에 여러 폴더를 놓을 수 있어 아래 drop 핸들러가 이미 처리한다.)
+const uploadQueue = new Map();   // path -> {file, path}
+function queueFolder(files) {
+  if (isReadonly()) { alert("읽기 전용 저장소에는 업로드할 수 없습니다"); return; }
+  for (const f of files) {
+    const path = f.webkitRelativePath || f.name;
+    if (!uploadQueue.has(path)) uploadQueue.set(path, { file: f, path });
+  }
+  renderUploadTray();
+}
+function renderUploadTray() {
+  const tray = $("upload-tray");
+  if (!uploadQueue.size) { tray.classList.add("hidden"); return; }
+  const entries = [...uploadQueue.values()];
+  const folders = [...new Set(entries.map((e) => e.path.split("/")[0]))];
+  const shown = folders.slice(0, 6).join(", ") + (folders.length > 6 ? " …" : "");
+  $("tray-summary").textContent =
+    `대기 중 · 폴더 ${folders.length}개 · 파일 ${entries.length}개  (${shown})`;
+  tray.classList.remove("hidden");
+}
+
 $("upload-folder-btn").addEventListener("click", () => $("folder-input").click());
+$("tray-add").addEventListener("click", () => $("folder-input").click());
 $("folder-input").addEventListener("change", (e) => {
-  uploadFiles(e.target.files);   // 각 File 의 webkitRelativePath 로 하위 구조 유지
-  e.target.value = "";
+  queueFolder(e.target.files);   // 각 File 의 webkitRelativePath 로 하위 구조 유지
+  e.target.value = "";           // 같은 폴더를 다시 고를 수 있도록 초기화
 });
+$("tray-upload").addEventListener("click", () => {
+  const list = [...uploadQueue.values()];
+  uploadQueue.clear();
+  renderUploadTray();
+  uploadFiles(list);
+});
+$("tray-clear").addEventListener("click", () => { uploadQueue.clear(); renderUploadTray(); });
 
 // items: FileList/File[] (각 File 이 webkitRelativePath 를 가질 수 있음) 또는 {file,path}[]
 async function uploadFiles(items) {

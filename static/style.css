@@ -242,6 +242,27 @@ body.dragging #drop-hint { display: block; }
   color: var(--accent);
 }
 
+/* 다중 폴더 업로드 대기열 */
+#upload-tray {
+  margin: 10px 24px 0;
+  padding: 10px 16px;
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+#upload-tray .tray-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 /* ---------- 파일 목록 ---------- */
 #file-list {
   display: grid;
