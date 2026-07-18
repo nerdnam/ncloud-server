@@ -12,6 +12,7 @@ hiddenimports = [
     # genDISK Drive (Windows Cloud Files API 온디맨드 드라이브)
     'gendisk_sync.cfapi', 'gendisk_sync.vfs',
     'gendisk_sync.navdrive', 'gendisk_sync.drive',
+    'gendisk_sync.single_instance',
     'pystray', 'pystray._win32',
     'PIL', 'PIL.Image', 'PIL.ImageDraw',
 ]

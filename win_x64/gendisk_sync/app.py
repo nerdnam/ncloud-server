@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from . import autostart
+from . import autostart, single_instance
 from .client import ApiError, AuthError, GenDiskClient, webdav_preflight
 from .config import Config
 from .drive import DriveController
@@ -101,6 +101,11 @@ class App:
         self.tray = None
         self._tray_notified = False
         self._build_tray()
+        # 두 번째 실행이 신호를 보내면 이 창을 전면화한다(단일 인스턴스).
+        try:
+            single_instance.start_show_listener(self._bring_to_front)
+        except Exception:
+            pass
         # genDISK Drive 가 켜져 있고 로그인돼 있으면 시작 시 연결
         if self.cfg.vfs_enabled and self.cfg.token:
             self._start_drive_async()
@@ -156,13 +161,30 @@ class App:
                 pass
 
     def _tray_show(self, icon=None, item=None):
-        self.root.after(0, lambda: (self.root.deiconify(), self.root.lift()))
+        self._bring_to_front()
+
+    def _bring_to_front(self):
+        """창을 복원·전면화한다 (트레이 클릭 / 두 번째 실행 신호). 스레드 안전."""
+        def _show():
+            try:
+                self.root.deiconify()
+                self.root.lift()
+                self.root.attributes("-topmost", True)
+                self.root.after(300, lambda: self.root.attributes("-topmost", False))
+                self.root.focus_force()
+            except Exception:
+                pass
+        self.root.after(0, _show)
 
     def _tray_quit(self, icon=None, item=None):
         self.root.after(0, self._real_quit)
 
     def _real_quit(self):
         self._collect(); self.cfg.save()
+        try:
+            single_instance.cleanup()
+        except Exception:
+            pass
         try:
             self.drive.stop()   # provider 연결만 해제(노드/싱크루트는 유지 → 다음 실행 시 재연결)
         except Exception:

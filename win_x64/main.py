@@ -23,6 +23,12 @@ def main():
         print("동기화 완료:", summary)
         return
 
+    # 단일 인스턴스: 이미 실행 중이면 그 창을 띄우고 이 프로세스는 종료한다.
+    from gendisk_sync import single_instance
+    if not single_instance.is_primary():
+        single_instance.signal_existing()
+        return
+
     from gendisk_sync.app import main as gui_main
     gui_main(startup="--startup" in sys.argv)
 
