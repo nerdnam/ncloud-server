@@ -63,6 +63,7 @@ class Provider:
         # refresh 는 이 폴더들만 서버와 대조해 새 항목을 추가한다(온디맨드 유지 + 작업량 최소).
         self._populated_dirs = set()
         self._ph_lock = threading.Lock()    # CfCreatePlaceholders 동시호출 직렬화
+        self._reconcile_lock = threading.Lock()  # 폴더 대조(refresh/refresh_dir) 직렬화 — 폴링·SSE 경쟁 방지
         self._hydrate_pool = None           # 병렬 다운로드 워커 풀(지연 생성)
         self._upload_seen = {}              # frel -> (size, mtime_ns): 안정성 대기 추적
         self._upload_done = {}              # frel -> (size, mtime_ns): 이미 업로드한 버전(재업로드 방지)
@@ -221,7 +222,8 @@ class Provider:
         (3) 이번 세션에 연 폴더들(_populated_dirs). (2)가 핵심: 홈이 한 번 열려 고정된 뒤
         새 파일이 안 뜨던 문제를 잡는다.
 
-        안전 원칙: '추가'만 한다(원격 삭제/수정은 건드리지 않음 → 데이터 손실 방지)."""
+        주기 폴링용(폴백). 실시간 반영은 refresh_dir()(SSE 이벤트 기반)가 담당한다.
+        안전 원칙: '추가'와 '우리 in-sync 항목의 서버측 삭제 반영'만 한다(사용자 로컬 변경 불가침)."""
         if self.list_dir is None:
             return 0
         targets = set(self._populated_dirs)
@@ -235,25 +237,104 @@ class Provider:
             targets.update(self._space_map.keys())
         added = 0
         for rel in list(targets):
-            local = self.root if rel == "" else os.path.join(
-                self.root, rel.replace("/", os.sep))
-            if not os.path.isdir(local):
-                continue
+            added += self._refresh_one(rel)
+        if added:
+            self.log(f"[vfs] refresh: +{added} new placeholder(s) total")
+        return added
+
+    def refresh_dir(self, space_id: str, server_dir: str) -> int:
+        """서버 변경 이벤트(space_id, server_dir)를 받아 그 폴더 하나만 즉시 대조/반영한다.
+        SSE(/api/sync/events) 로 폰·웹·다른 기기의 변경을 실시간으로 드라이브에 나타낸다.
+        폴더가 아직 로컬에 없으면(안 열림) 조용히 넘어간다 — 열 때 온디맨드로 채워진다."""
+        if self.list_dir is None:
+            return 0
+        rel = self._drive_rel_for(space_id, server_dir)
+        if rel is None:
+            return 0
+        return self._refresh_one(rel)
+
+    def _drive_rel_for(self, space_id, server_dir):
+        """서버 (space_id, server_dir) → 드라이브 상대경로(posix). 매핑 불가면 None."""
+        server_dir = (server_dir or "").strip("/")
+        if self.list_spaces is not None:
+            if not self._space_map:
+                try:
+                    self._space_entries()
+                except Exception:  # noqa: BLE001
+                    return None
+            name = None
+            for nm, sid in self._space_map.items():
+                if sid == space_id or self._same_home(sid, space_id):
+                    name = nm
+                    break
+            if name is None:
+                return None
+            return name if not server_dir else name + "/" + server_dir
+        # 단일 저장소 모드
+        if space_id == self.space or self._same_home(space_id, self.space):
+            return server_dir
+        return None
+
+    @staticmethod
+    def _same_home(a, b) -> bool:
+        """서버가 홈 공간을 ''/'home' 중 무엇으로 부르든 같은 것으로 취급."""
+        return a in ("", "home") and b in ("", "home")
+
+    def _safe_to_remove(self, path: str) -> bool:
+        """서버 삭제 반영으로 이 경로를 로컬에서 지워도 되는가.
+        서브트리 전체가 '우리' placeholder 일 때만 True — 파일은 in-sync(수정 안 됨),
+        폴더는 placeholder 이고 내용물 전부가 재귀적으로 안전해야 한다.
+        사용자 드롭 실제 파일·수정된(비 in-sync) 파일이 하나라도 있으면 False(데이터 불가침).
+        (예전엔 폴더 자신만 in-sync 면 rmtree 해서, 안에 있던 미업로드 파일까지 지워질 수 있었다.)"""
+        try:
+            st = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return False
+        state = C.CfGetPlaceholderStateFromAttributeTag(
+            getattr(st, "st_file_attributes", 0), getattr(st, "st_reparse_tag", 0))
+        if state == C.CF_PLACEHOLDER_STATE_INVALID or not (
+                state & C.CF_PLACEHOLDER_STATE_PLACEHOLDER):
+            return False                     # placeholder 아님 = 사용자 파일/폴더
+        if os.path.isdir(path):
+            # 폴더 placeholder(서버가 심었거나 업로드로 변환된 것) — 서버발 폴더는 in-sync 표시가
+            # 없으므로(온디맨드 채우기 유지용) in-sync 를 요구하지 않는다. 내용물이 전부 안전해야 제거.
             try:
-                entries = self._children_for(rel)
+                children = os.listdir(path)
+            except OSError:
+                return False
+            return all(self._safe_to_remove(os.path.join(path, c)) for c in children)
+        return bool(state & C.CF_PLACEHOLDER_STATE_IN_SYNC)
+
+    def _refresh_one(self, rel) -> int:
+        """폴더 하나(rel, 드라이브 상대 posix)를 서버와 대조: 새 항목 추가 + 서버 삭제분 제거.
+        폴링(refresh)과 실시간(refresh_dir)이 같은 폴더를 동시에 건드리지 않도록 _reconcile_lock
+        으로 직렬화한다(이중 삭제/생성 경쟁 방지). 반환값은 이번에 추가된 placeholder 수."""
+        local = self.root if rel == "" else os.path.join(
+            self.root, rel.replace("/", os.sep))
+        if not os.path.isdir(local):
+            return 0
+        try:
+            # 서버 목록 조회(네트워크)는 락 밖에서 — 락을 잡은 채 60초 HTTP 를 기다리면
+            # 다른 폴더의 실시간(SSE) 반영까지 그 뒤로 직렬화되기 때문.
+            entries = self._children_for(rel)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[vfs] refresh '{rel}' skip: {e!r}")
+            return 0
+        with self._reconcile_lock:
+            try:
                 existing = set(os.listdir(local))
             except Exception as e:  # noqa: BLE001
                 self.log(f"[vfs] refresh '{rel}' skip: {e!r}")
-                continue
+                return 0
+            added = 0
             fresh = [e for e in entries if e["name"] not in existing]
             if fresh:
                 try:
-                    n = self._create_placeholders_in(local, fresh)
-                    added += n
-                    self.log(f"[vfs] refresh '{rel or '/'}': +{n}")
+                    added = self._create_placeholders_in(local, fresh)
+                    self.log(f"[vfs] refresh '{rel or '/'}': +{added}")
                 except OSError as e:
                     self.log(f"[vfs] refresh create '{rel}': {e!r}")
-            # 서버에서 사라진 것 = 삭제됨 → 로컬 placeholder 도 제거(우리 in-sync 것만).
+            # 서버에서 사라진 것 = 삭제됨 → 로컬 placeholder 도 제거(우리 것만, 재귀 검사).
             # 로컬 제거가 다시 서버 삭제로 전파되지 않게 _suppress_delete 로 막는다(오탐 데이터 손실 방지).
             server_names = {e["name"] for e in entries}
             for lname in existing:
@@ -261,15 +342,8 @@ class Provider:
                         or lname.startswith(".")):
                     continue
                 child = os.path.join(local, lname)
-                try:
-                    cst = os.stat(child, follow_symlinks=False)
-                except OSError:
-                    continue
-                cstate = C.CfGetPlaceholderStateFromAttributeTag(
-                    getattr(cst, "st_file_attributes", 0), getattr(cst, "st_reparse_tag", 0))
-                if cstate == C.CF_PLACEHOLDER_STATE_INVALID or not (
-                        cstate & C.CF_PLACEHOLDER_STATE_IN_SYNC):
-                    continue                 # 사용자 신규/수정/드롭 파일은 절대 안 건드림
+                if not self._safe_to_remove(child):
+                    continue                 # 사용자 신규/수정/드롭 파일(포함한 폴더)은 절대 안 건드림
                 crel = lname if rel == "" else rel + "/" + lname
                 self._suppress_delete.add(crel)
                 try:
@@ -283,9 +357,7 @@ class Provider:
                 except OSError as e:  # noqa: BLE001
                     self._suppress_delete.discard(crel)
                     self.log(f"[vfs] remove '{crel}': {e!r}")
-        if added:
-            self.log(f"[vfs] refresh: +{added} new placeholder(s) total")
-        return added
+            return added
 
     # ---------------------------------------------------------------- 로컬→원격 업로드
     def _upload_target(self, frel: str):
@@ -421,8 +493,11 @@ class Provider:
                     self.log(f"[vfs] upload '{frel}' error: {e!r}")
                     if self.notify:
                         self.notify(f"⚠ 업로드 실패: {name}")
-        for k in [k for k in self._upload_seen if k not in live]:
-            self._upload_seen.pop(k, None)
+        # list() 는 C 레벨에서 원자적 스냅샷 — CfAPI 콜백(_on_delete/_on_rename)이 동시에
+        # pop 해도 '순회 중 dict 변경' 예외가 나지 않는다.
+        for k in list(self._upload_seen):
+            if k not in live:
+                self._upload_seen.pop(k, None)
         if uploaded:
             self.log(f"[vfs] upload_scan: {uploaded} file(s)")
         return uploaded

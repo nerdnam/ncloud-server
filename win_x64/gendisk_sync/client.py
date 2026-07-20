@@ -125,6 +125,51 @@ def _blocked_by_cloudflare(status: int, body: str) -> str | None:
     return None
 
 
+class EventStream:
+    """서버의 실시간 변경 스트림(SSE, text/event-stream) 한 연결.
+
+    반복(for)하면 파싱된 이벤트(dict, 예: {"space","dir"})를 하나씩 내놓는다.
+    스트림이 끊기거나 EOF 면 조용히 반복이 끝난다(→ 호출측이 재연결). 다른 스레드에서
+    close() 를 부르면 블록된 읽기가 풀려 반복이 끝난다(종료용). 전용 연결이라 keep-alive
+    풀과 섞이지 않는다."""
+
+    def __init__(self, conn, resp):
+        self._conn = conn
+        self._resp = resp
+
+    def __iter__(self):
+        data_lines: list[str] = []
+        while True:
+            try:
+                raw = self._resp.readline()      # HTTPResponse: 청크 해제된 한 줄(개행 포함)
+            except Exception:
+                return                            # 소켓 오류/닫힘 → 반복 종료(재연결은 호출측)
+            if not raw:
+                return                            # EOF
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if line == "":                        # 빈 줄 = 이벤트 경계
+                if data_lines:
+                    payload = "\n".join(data_lines)
+                    data_lines = []
+                    try:
+                        yield json.loads(payload)
+                    except Exception:
+                        pass                      # 파싱 불가한 이벤트는 무시
+                continue
+            if line.startswith(":"):              # 주석(핑) — 무시
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip(" "))
+            # event:/id:/retry: 등 다른 필드는 이 클라이언트에선 쓰지 않는다
+
+    def close(self):
+        for x in (self._resp, self._conn):
+            try:
+                x.close()
+            except Exception:
+                pass
+
+
 class GenDiskClient:
     def __init__(self, base_url: str, token: str | None = None, timeout: int = 60):
         self.base_url = base_url.rstrip("/")
@@ -140,12 +185,13 @@ class GenDiskClient:
         self._local = threading.local()
 
     # ---------- 저수준 요청 (스레드별 keep-alive 연결 재사용) ----------
-    def _new_conn(self):
+    def _new_conn(self, timeout: int | None = None):
+        to = timeout or self.timeout
         if self._scheme == "https":
             return http.client.HTTPSConnection(
-                self._host, self._port or 443, timeout=self.timeout,
+                self._host, self._port or 443, timeout=to,
                 context=ssl.create_default_context())
-        return http.client.HTTPConnection(self._host, self._port or 80, timeout=self.timeout)
+        return http.client.HTTPConnection(self._host, self._port or 80, timeout=to)
 
     def _drop_conn(self):
         conn = getattr(self._local, "conn", None)
@@ -273,6 +319,60 @@ class GenDiskClient:
         return self._json("GET", "/api/files/usage")
 
     # ---------- 동기화 ----------
+    def open_events(self, last_event_id: str | None = None) -> "EventStream":
+        """서버 변경 이벤트 스트림(/api/sync/events, SSE)을 연다. 무기한 열려 있으므로
+        스레드로컬 keep-alive 풀과 분리된 '전용' 연결을 쓴다. 반환된 EventStream 을
+        반복하면 {space, dir} 이벤트를 받는다. 서버는 25초마다 핑을 보내므로 그보다
+        넉넉한 소켓 타임아웃(90s)으로 죽은 연결을 감지한다.
+
+        401 → AuthError(재로그인 필요). 그 외 비정상 응답(미지원 404/405/501 포함) → ApiError."""
+        conn = self._new_conn(timeout=90)
+        path = self._prefix + "/api/sync/events"
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+        }
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+        if last_event_id:
+            headers["Last-Event-ID"] = last_event_id
+        try:
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+        except (http.client.HTTPException, OSError) as e:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise ApiError(0, f"이벤트 스트림 연결 실패: {e}")
+        if resp.status == 401:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise AuthError("이벤트 스트림 인증 실패")
+        if resp.status != 200:
+            try:
+                body = resp.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                body = ""
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise ApiError(resp.status, body or "이벤트 스트림 오류")
+        ctype = (resp.getheader("Content-Type") or "").lower()
+        if "text/event-stream" not in ctype:
+            # 200 이지만 SSE 가 아님(프록시/Cloudflare 챌린지 페이지 등) — 스트림으로 오인해
+            # 즉시 EOF → 1초 재연결 스핀에 빠지지 않게 오류로 올린다(호출측이 백오프).
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise ApiError(resp.status, f"이벤트 스트림 아님 (Content-Type: {ctype or '없음'})")
+        return EventStream(conn, resp)
+
     def enumerate(self, space: str, path: str = "") -> dict:
         return self._json("GET", "/api/sync/enumerate",
                           params={"space": space, "path": path})

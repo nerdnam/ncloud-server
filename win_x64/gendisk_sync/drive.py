@@ -10,7 +10,7 @@ import threading
 import time
 
 from . import navdrive, vfs
-from .client import AuthError, GenDiskClient
+from .client import ApiError, AuthError, GenDiskClient
 from .icon import icon_path
 
 
@@ -94,6 +94,9 @@ class DriveController:
         self._lock = threading.Lock()
         self._refresh_stop = None       # threading.Event — 원격 변경 반영 폴링 중지 신호
         self._refresh_thread = None
+        self._events_stop = None        # threading.Event — 실시간 이벤트(SSE) 스레드 중지 신호
+        self._events_thread = None
+        self._events_stream = None      # 열려 있는 EventStream (종료 시 close 로 읽기 깨우기)
         self._cached_client = None      # keep-alive 연결을 살리려 클라이언트를 재사용
 
     def _make_log(self, applog):
@@ -195,6 +198,91 @@ class DriveController:
             return 0
         return prov.refresh()
 
+    # --- 실시간 반영 (서버 SSE 이벤트 → 변경 폴더만 즉시 새로고침) ---
+    def _open_event_stream(self):
+        """전용 연결로 서버 이벤트 스트림을 연다(세션 만료 시 1회 재로그인 후 재시도)."""
+        try:
+            return self._client().open_events()
+        except AuthError:
+            if self.on_reauth and self.on_reauth():
+                return self._client().open_events()
+            raise
+
+    def _on_change_event(self, ev):
+        """서버 변경 이벤트 {space, dir} → 그 폴더만 즉시 대조/반영(추가·서버삭제 모두)."""
+        if not isinstance(ev, dict):
+            return
+        space = ev.get("space")
+        server_dir = ev.get("dir", "")
+        if not space:
+            return
+        prov = self.provider
+        if prov is None:
+            return
+        try:
+            n = prov.refresh_dir(space, server_dir)
+            if n:
+                self.log(f"[drive] 실시간 반영 {space}:/{server_dir} (+{n})")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[drive] refresh_dir 오류: {e!r}")
+
+    def _events_loop(self):
+        """서버 SSE(/api/sync/events)를 구독해 변경을 즉시 반영한다. 연결이 끊기면
+        백오프 후 재연결한다. 서버가 미지원(404 등)이면 조용히 폴링만 쓰도록 종료한다.
+        폴링 루프(_refresh_loop)는 폴백으로 계속 돈다(이벤트 유실·연결 공백 대비)."""
+        backoff = 1.0
+        stop = self._events_stop
+        while stop is not None and not stop.is_set():
+            if self.provider is None:
+                break
+            try:
+                stream = self._open_event_stream()
+            except ApiError as e:
+                if getattr(e, "status", None) in (404, 405, 501):
+                    self.log("[drive] 서버가 실시간 이벤트(/events) 미지원 → 폴링만 사용")
+                    return
+                self.log(f"[drive] 이벤트 연결 오류: {e}")
+                if stop.wait(min(30.0, backoff)):
+                    break
+                backoff = min(30.0, backoff * 2)
+                continue
+            except Exception as e:  # noqa: BLE001  (AuthError 재로그인 실패 포함)
+                self.log(f"[drive] 이벤트 연결 실패: {e!r}")
+                if stop.wait(min(30.0, backoff)):
+                    break
+                backoff = min(30.0, backoff * 2)
+                continue
+
+            self._events_stream = stream
+            # stop() 이 '연결 중'(스트림 발행 전)에 불렸으면 닫을 핸들이 없어 못 깨웠다 →
+            # 발행 직후 재확인해 여기서 스스로 정리한다. (stop 은 이벤트를 먼저 set 하고
+            # 스트림을 읽으므로, 어느 쪽이든 한쪽은 반드시 close 를 수행한다.)
+            if stop.is_set():
+                self._events_stream = None
+                try:
+                    stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                break
+            self.log("[drive] 실시간 이벤트 연결됨")
+            backoff = 1.0
+            try:
+                for ev in stream:
+                    if stop.is_set():
+                        break
+                    self._on_change_event(ev)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[drive] 이벤트 스트림 끊김: {e!r}")
+            finally:
+                self._events_stream = None
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            if stop.wait(min(5.0, backoff)):   # 재연결 전 짧은 대기
+                break
+        self.log("[drive] 실시간 이벤트 종료")
+
     # --- 수명주기 ---
     @property
     def running(self) -> bool:
@@ -219,16 +307,32 @@ class DriveController:
             prov.connect()                 # 내부에서 populate_root()
             navdrive.register_drive(root, icon)
             self.provider = prov
-            # 원격 변경 반영 폴링 시작 (다른 기기가 올린 파일이 드라이브에 나타나게)
+            # 원격 변경 반영 폴링 시작 (폴백 + 로컬 드롭 업로드 감지)
             self._refresh_stop = threading.Event()
             self._refresh_thread = threading.Thread(
                 target=self._refresh_loop, name="gendisk-drive-refresh", daemon=True)
             self._refresh_thread.start()
+            # 실시간 이벤트(SSE) 구독 시작 (폰/웹/다른 기기 변경을 즉시 반영)
+            self._events_stop = threading.Event()
+            self._events_thread = threading.Thread(
+                target=self._events_loop, name="gendisk-drive-events", daemon=True)
+            self._events_thread.start()
             self.log(f"[drive] genDISK Drive 연결됨: {root}")
 
     def stop(self, remove_node: bool = False):
         """provider 연결 해제. remove_node=True 면 탐색기 노드+싱크루트도 제거."""
         with self._lock:
+            if self._events_stop is not None:       # 실시간 이벤트 스레드 중지 + 열린 스트림 닫기
+                self._events_stop.set()
+                self._events_stop = None
+                self._events_thread = None
+                st = self._events_stream            # 블록된 readline 을 깨워 스레드가 빠져나오게
+                if st is not None:
+                    try:
+                        st.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self._events_stream = None
             if self._refresh_stop is not None:      # 폴링 먼저 멈춘다(provider 를 더 안 건드리게)
                 self._refresh_stop.set()
                 self._refresh_stop = None
