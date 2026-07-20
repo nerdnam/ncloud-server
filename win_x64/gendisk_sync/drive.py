@@ -15,25 +15,31 @@ from .icon import icon_path
 
 
 class TransferTracker:
-    """진행 중인 전송(업로드/다운로드)을 스레드 안전하게 추적한다 — FTP식 파일별 상태 표시용."""
-    def __init__(self):
+    """진행 중인 전송(업로드/다운로드)을 스레드 안전하게 추적 — FTP식 파일별 상태 표시용.
+    갱신이 expire 초 넘게 멈춘 항목은 snapshot 에서 자동 제거(완료/중단된 다운로드 정리)."""
+    def __init__(self, expire=6.0):
         self._lock = threading.Lock()
-        self._items = {}   # key -> {name, dir, done, total, updated, rate}
+        self._items = {}   # key -> {name, dir, done, total, updated, rate, _rt, _rb}
+        self._expire = expire
 
     def update(self, key, name, direction, done, total):
         now = time.monotonic()
+        done = int(done)
         with self._lock:
             it = self._items.get(key)
             if it is None:
-                it = {"name": name, "dir": direction, "done": 0,
-                      "total": max(0, int(total or 0)), "updated": now, "rate": 0.0}
-                self._items[key] = it
-            dt = now - it["updated"]
-            if dt >= 0.25:                       # 전송률: 지수이동평균
-                inst = max(0, done - it["done"]) / dt
+                self._items[key] = {"name": name, "dir": direction, "done": done,
+                                    "total": max(0, int(total or 0)), "updated": now,
+                                    "rate": 0.0, "_rt": now, "_rb": done}
+                return
+            dt = now - it["_rt"]
+            if dt >= 0.4:                        # 전송률: 지수이동평균(누적 done 기준)
+                inst = max(0, done - it["_rb"]) / dt
                 it["rate"] = inst if it["rate"] == 0 else it["rate"] * 0.6 + inst * 0.4
-                it["updated"] = now
-            it["done"] = int(done)
+                it["_rt"] = now
+                it["_rb"] = done
+            it["done"] = done
+            it["updated"] = now
             if total:
                 it["total"] = int(total)
 
@@ -42,7 +48,10 @@ class TransferTracker:
             self._items.pop(key, None)
 
     def snapshot(self):
+        now = time.monotonic()
         with self._lock:
+            for k in [k for k, v in self._items.items() if now - v["updated"] > self._expire]:
+                self._items.pop(k, None)
             return [dict(v) for v in self._items.values()]
 
 # CfAPI ProviderId (고정)
@@ -152,9 +161,13 @@ class DriveController:
         # 로컬 삭제 → 서버 삭제. 이미 없으면(404) 서버가 알아서 처리.
         self._with_reauth(lambda c: c.delete(space, path))
 
-    def _rename_file(self, space, src, dst):
-        # 로컬 이름변경/이동 → 서버 이동(move).
-        self._with_reauth(lambda c: c.move(space, src, dst))
+    def _rename_file(self, space, src, dst, src_space=None, dst_space=None):
+        # 로컬 이름변경/이동 → 서버 이동(move). 저장소 간이면 src_space/dst_space 지정.
+        self._with_reauth(lambda c: c.move(space, src, dst, src_space, dst_space))
+
+    def _mkdir_dir(self, space, path):
+        # 로컬 새 폴더 → 서버 mkdir.
+        self._with_reauth(lambda c: c.mkdir(space, path))
 
     # --- 원격 변경 반영 (폰/웹 업로드가 드라이브에 나타나게) ---
     def _refresh_loop(self):
@@ -199,7 +212,8 @@ class DriveController:
             prov = vfs.Provider(root, PROVIDER_GUID, self._fetch_range,
                                 list_dir=self._list_dir, list_spaces=self._list_spaces,
                                 upload=self._upload_file, delete=self._delete_file,
-                                rename=self._rename_file, notify=self._notify,
+                                rename=self._rename_file, mkdir=self._mkdir_dir,
+                                notify=self._notify, progress=self._progress,
                                 space=self.cfg.space, log=self.log)
             prov.register()
             prov.connect()                 # 내부에서 populate_root()

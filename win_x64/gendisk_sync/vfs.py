@@ -39,7 +39,8 @@ def set_expose_placeholders():
 
 class Provider:
     def __init__(self, root: str, provider_guid: str, fetch_range, list_dir=None,
-                 list_spaces=None, upload=None, delete=None, rename=None, notify=None,
+                 list_spaces=None, upload=None, delete=None, rename=None, mkdir=None,
+                 notify=None, progress=None,
                  space: str = "home", provider_name: str = "genDISK",
                  identity: bytes = b"genDISK", log=print):
         self.root = os.path.abspath(root)
@@ -51,8 +52,10 @@ class Provider:
         self.list_spaces = list_spaces      # () -> [{id,name,readonly}] (다중 저장소 모드)
         self.upload = upload                # (space:str, path:str, local_path:str) -> None (로컬→원격)
         self.delete = delete                # (space:str, path:str) -> None (로컬 삭제 → 서버 삭제)
-        self.rename = rename                # (space:str, src:str, dst:str) -> None (이름변경/이동)
+        self.rename = rename                # (space, src, dst, src_space?, dst_space?) -> None
+        self.mkdir = mkdir                  # (space:str, path:str) -> None (새 폴더 생성)
         self.notify = notify                # (msg:str) -> None (토스트 알림, 업로드 진행 표시용)
+        self.progress = progress            # (key,name,dir,done,total) -> None (다운로드 진행)
         self.space = space
         self.log = log
         self._space_map = {}                # 폴더이름 -> space id (다중 저장소)
@@ -63,6 +66,7 @@ class Provider:
         self._hydrate_pool = None           # 병렬 다운로드 워커 풀(지연 생성)
         self._upload_seen = {}              # frel -> (size, mtime_ns): 안정성 대기 추적
         self._upload_done = {}              # frel -> (size, mtime_ns): 이미 업로드한 버전(재업로드 방지)
+        self._suppress_delete = set()       # refresh 가 로컬에서 지운 것 — 서버 삭제로 전파 금지
         # 볼륨 상대 루트 경로(콜백의 NormalizedPath 는 드라이브 문자 없는 볼륨 상대 경로)
         self._root_volrel = os.path.splitdrive(self.root)[1]
         self.conn_key = None
@@ -249,6 +253,36 @@ class Provider:
                     self.log(f"[vfs] refresh '{rel or '/'}': +{n}")
                 except OSError as e:
                     self.log(f"[vfs] refresh create '{rel}': {e!r}")
+            # 서버에서 사라진 것 = 삭제됨 → 로컬 placeholder 도 제거(우리 in-sync 것만).
+            # 로컬 제거가 다시 서버 삭제로 전파되지 않게 _suppress_delete 로 막는다(오탐 데이터 손실 방지).
+            server_names = {e["name"] for e in entries}
+            for lname in existing:
+                if (lname in server_names or lname.lower() == "desktop.ini"
+                        or lname.startswith(".")):
+                    continue
+                child = os.path.join(local, lname)
+                try:
+                    cst = os.stat(child, follow_symlinks=False)
+                except OSError:
+                    continue
+                cstate = C.CfGetPlaceholderStateFromAttributeTag(
+                    getattr(cst, "st_file_attributes", 0), getattr(cst, "st_reparse_tag", 0))
+                if cstate == C.CF_PLACEHOLDER_STATE_INVALID or not (
+                        cstate & C.CF_PLACEHOLDER_STATE_IN_SYNC):
+                    continue                 # 사용자 신규/수정/드롭 파일은 절대 안 건드림
+                crel = lname if rel == "" else rel + "/" + lname
+                self._suppress_delete.add(crel)
+                try:
+                    if os.path.isdir(child):
+                        import shutil
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        os.remove(child)
+                    self._populated_dirs.discard(crel)
+                    self.log(f"[vfs] removed (server-deleted): {crel}")
+                except OSError as e:  # noqa: BLE001
+                    self._suppress_delete.discard(crel)
+                    self.log(f"[vfs] remove '{crel}': {e!r}")
         if added:
             self.log(f"[vfs] refresh: +{added} new placeholder(s) total")
         return added
@@ -293,7 +327,7 @@ class Provider:
         - 두 폴 주기 동안 크기·수정시각이 안 변한 '안정된' 파일만 올린다(쓰는 중 방지).
         - 이미 올린 버전은 재업로드하지 않는다.
         대상 폴더는 refresh 와 동일(루트 + 저장소 폴더 + 이번 세션에 연 폴더)."""
-        if self.upload is None:
+        if self.upload is None and self.mkdir is None:
             return 0
         targets = set(self._populated_dirs)
         targets.add("")
@@ -316,29 +350,45 @@ class Provider:
             except OSError:
                 continue
             for de in entries:
-                try:
-                    if not de.is_file(follow_symlinks=False):
-                        continue
-                    st = de.stat(follow_symlinks=False)
-                except OSError:
-                    continue
                 name = de.name
                 if name.lower() == "desktop.ini" or name.startswith("."):
                     continue
-                attrs = getattr(st, "st_file_attributes", 0)
-                # 오프라인(디하이드레이트)= 로컬 데이터 없음 → 드롭한 파일이 아니다(우리 placeholder).
-                # 올리려고 읽으면 하이드레이션이 돌아 실패(무한 업로드 루프)하므로 반드시 건너뛴다.
-                if attrs & C.FILE_ATTRIBUTE_OFFLINE:
+                try:
+                    is_dir = de.is_dir(follow_symlinks=False)
+                    st = de.stat(follow_symlinks=False)
+                except OSError:
                     continue
-                # 우리 파일(in-sync 플레이스홀더)은 건너뛰고, 아직 서버에 없는(신규/보류)만 올린다.
-                # reparse 유무가 아니라 in-sync 로 판별 → Windows 가 드롭을 곧바로 placeholder 로
-                # 만들어도 놓치지 않는다.
+                attrs = getattr(st, "st_file_attributes", 0)
                 state = C.CfGetPlaceholderStateFromAttributeTag(
                     attrs, getattr(st, "st_reparse_tag", 0))
+                is_ph = state != C.CF_PLACEHOLDER_STATE_INVALID and (
+                    state & C.CF_PLACEHOLDER_STATE_PLACEHOLDER)
+                frel = name if rel == "" else rel + "/" + name
+                if is_dir:
+                    # 우리 placeholder 폴더면 스킵. 사용자가 만든 새 폴더면 서버 mkdir + placeholder 변환.
+                    if is_ph or self.mkdir is None or self._upload_done.get(frel) == "dir":
+                        continue
+                    live.add(frel)
+                    tgt = self._upload_target(frel)
+                    if tgt and tgt[1]:
+                        try:
+                            self.mkdir(tgt[0], tgt[1])
+                            self._mark_uploaded(
+                                de.path, {"space": tgt[0], "path": tgt[1], "dir": True})
+                            self._upload_done[frel] = "dir"
+                            self._populated_dirs.add(frel)   # 하위 파일도 다음 스캔에 포함
+                            self.log(f"[vfs] mkdir on server: {tgt[0]}:{tgt[1]}")
+                        except Exception as e:  # noqa: BLE001
+                            self.log(f"[vfs] mkdir '{frel}': {e!r}")
+                    continue
+                # ---- 파일 ----
+                # 오프라인(디하이드레이트)= 로컬 데이터 없음 → 드롭 아님(우리 placeholder). 올리려고
+                # 읽으면 하이드레이션 실패(무한 루프)하므로 반드시 스킵. in-sync 도 우리 파일이라 스킵.
+                if attrs & C.FILE_ATTRIBUTE_OFFLINE:
+                    continue
                 if state != C.CF_PLACEHOLDER_STATE_INVALID and (
                         state & C.CF_PLACEHOLDER_STATE_IN_SYNC):
                     continue
-                frel = name if rel == "" else rel + "/" + name
                 key = (st.st_size, st.st_mtime_ns)
                 live.add(frel)
                 if self._upload_done.get(frel) == key:      # 이미 이 버전 올림
@@ -499,6 +549,11 @@ class Provider:
         inflight = {}       # index -> Future(bytes)
         nxt = 0
         transferred = 0
+        # 다운로드 진행 표시(큰 파일만): done=파일 내 현재 위치, total=파일 크기. 순차 복사면
+        # off 가 커지며 0→100% 가 된다. 트래커는 갱신이 멈추면 알아서 사라진다(별도 종료 불필요).
+        pkey = ("d:" + local_path) if local_path else None
+        show_prog = bool(self.progress and pkey and file_size > CHUNK)
+        dname = os.path.basename(local_path) if local_path else ""
         while nxt < len(offsets) and len(inflight) < HYDRATE_WORKERS:
             inflight[nxt] = pool.submit(fetch, offsets[nxt]); nxt += 1
         for i in range(len(offsets)):
@@ -516,6 +571,9 @@ class Provider:
                     self._schedule_dehydrate(local_path)
                 return
             transferred += len(data)
+            if show_prog:
+                self.progress(pkey, dname, "down",
+                              min(file_size, offsets[i] + len(data)), file_size)
 
     def _transfer(self, conn, xfer, offset, data: bytes) -> bool:
         """데이터 한 조각을 Windows 로 전송. 성공 True, 앱이 취소했으면 False(중단 신호),
@@ -567,6 +625,9 @@ class Provider:
                 return
             self._upload_seen.pop(rel, None)
             self._upload_done.pop(rel, None)
+            if rel in self._suppress_delete:      # refresh 가 지운 것 → 서버 삭제 전파 금지
+                self._suppress_delete.discard(rel)
+                return
             tgt = self._upload_target(rel)
             if tgt is None or not tgt[1] or self.delete is None:
                 return
@@ -592,10 +653,12 @@ class Provider:
             if not o or not n or not o[1] or not n[1] or self.rename is None:
                 return
             if o[0] != n[0]:
-                self.log(f"[vfs] rename across spaces unsupported: {old_rel} -> {new_rel}")
-                return
-            self.rename(o[0], o[1], n[1])
-            self.log(f"[vfs] renamed on server: {o[0]}: {o[1]} -> {n[1]}")
+                # 저장소 간 이동(내 파일↔work 등) — 서버가 src_space/dst_space 로 처리(shutil.move).
+                self.rename(n[0], o[1], n[1], src_space=o[0], dst_space=n[0])
+                self.log(f"[vfs] moved across spaces: {o[0]}:{o[1]} -> {n[0]}:{n[1]}")
+            else:
+                self.rename(o[0], o[1], n[1])
+                self.log(f"[vfs] renamed on server: {o[0]}: {o[1]} -> {n[1]}")
             # 로컬 placeholder 의 FileIdentity 를 새 경로로 갱신 + in-sync 표시.
             # (안 하면 열 때 옛 경로로 FETCH_DATA → 404, upload_scan 이 오해해 계속 업로드.)
             new_local = self.root if new_rel == "" else os.path.join(

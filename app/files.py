@@ -564,6 +564,8 @@ class MoveBody(BaseModel):
     src: str
     dst: str
     space: str = HOME_SPACE
+    src_space: str | None = None   # 없으면 space — 저장소 간 이동 지원
+    dst_space: str | None = None   # 없으면 space
 
 
 # 모든 이동을 직렬화해, "대상 존재 확인 → 이동" 사이의 경쟁으로 파일이 조용히
@@ -574,16 +576,22 @@ _move_lock = asyncio.Lock()
 
 @router.post("/move")
 async def move(body: MoveBody, user: dict = Depends(current_user)):
-    """같은 저장소 안에서 파일/폴더를 다른 위치로 이동한다 (폴더 간 이동 포함)."""
-    root = space_root(user, body.space)
-    src = safe_path(user, body.src, body.space)
-    dst = safe_path(user, body.dst, body.space)
-    if src == root:
+    """파일/폴더를 다른 위치로 이동한다 (폴더 간 + 저장소 간 이동 포함).
+    src_space/dst_space 를 다르게 주면 저장소 간 이동(shutil.move 가 볼륨 넘어가면 복사+삭제)."""
+    ss = body.src_space or body.space
+    ds = body.dst_space or body.space
+    src_root = space_root(user, ss)
+    dst_root = space_root(user, ds)
+    src = safe_path(user, body.src, ss)
+    dst = safe_path(user, body.dst, ds)
+    if src == src_root:
         raise HTTPException(400, "루트 폴더는 이동할 수 없습니다")
     if not src.exists():
         raise HTTPException(404, "대상을 찾을 수 없습니다")
-    if dst == root:
+    if dst == dst_root:
         raise HTTPException(400, "잘못된 대상 경로입니다")
+    if ds not in ("", HOME_SPACE) and not _writable(dst_root):
+        raise HTTPException(403, "읽기 전용 저장소입니다")
     # 폴더를 자기 자신 또는 자기 하위로 이동하는 것을 막는다
     if src.is_dir() and (dst == src or src in dst.parents):
         raise HTTPException(400, "폴더를 자기 하위로 이동할 수 없습니다")
@@ -602,8 +610,8 @@ async def move(body: MoveBody, user: dict = Depends(current_user)):
             raise _fs_error(exc)
     # 이동하면 원래 경로의 공유는 대상을 잃으므로 제거
     from . import shares
-    shares.drop_shares_for(user["id"], body.space, body.src)
-    return {"ok": True, "path": dst.relative_to(root).as_posix()}
+    shares.drop_shares_for(user["id"], ss, body.src)
+    return {"ok": True, "path": dst.relative_to(dst_root).as_posix()}
 
 
 @router.get("/usage")

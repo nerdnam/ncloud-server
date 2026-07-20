@@ -388,7 +388,12 @@ class GenDiskClient:
             if e.status != 404:  # 이미 없으면 무시
                 raise
 
-    def move(self, space: str, src: str, dst: str) -> dict:
-        """같은 저장소 안에서 이동/이름변경 (src -> dst). 폴더 간 이동도 포함."""
-        return self._json("POST", "/api/files/move",
-                          json_body={"src": src, "dst": dst, "space": space})
+    def move(self, space: str, src: str, dst: str,
+             src_space: str | None = None, dst_space: str | None = None) -> dict:
+        """이동/이름변경 (src -> dst). 폴더 간 + (src_space/dst_space 다르면) 저장소 간 이동."""
+        body = {"src": src, "dst": dst, "space": space}
+        if src_space:
+            body["src_space"] = src_space
+        if dst_space:
+            body["dst_space"] = dst_space
+        return self._json("POST", "/api/files/move", json_body=body)
