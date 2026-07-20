@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from .auth import current_user
 from .database import FILES_DIR, MOUNTS_DIR, THUMBS_DIR, get_db
+from .events import notify_change, parent_of
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -327,6 +328,8 @@ async def upload(
                 raise _fs_error(exc)
             used += written
             saved.append(dest.relative_to(target_dir).as_posix())
+    if saved:
+        notify_change(space or HOME_SPACE, path.strip("/"), user["id"], private=is_home)
     return {"saved": saved}
 
 
@@ -479,7 +482,9 @@ def upload_complete(upload_id: str, user: dict = Depends(current_user)):
         part.unlink(missing_ok=True); meta_p.unlink(missing_ok=True)
         raise _fs_error(exc)
     meta_p.unlink(missing_ok=True)
-    return {"saved": dest.relative_to(root).as_posix()}
+    saved_rel = dest.relative_to(root).as_posix()
+    notify_change(space or HOME_SPACE, parent_of(saved_rel), user["id"], private=is_home)
+    return {"saved": saved_rel}
 
 
 def _fmt_size(n: int) -> str:
@@ -514,6 +519,8 @@ def mkdir(body: PathBody, user: dict = Depends(current_user)):
         target.mkdir(parents=True)
     except OSError as exc:
         raise _fs_error(exc)
+    notify_change(body.space or HOME_SPACE, parent_of(body.path), user["id"],
+                  private=body.space in ("", HOME_SPACE))
     return {"ok": True}
 
 
@@ -534,6 +541,8 @@ def delete(body: PathBody, user: dict = Depends(current_user)):
     # 삭제된 경로(및 하위)에 걸린 공유 링크가 나중에 같은 경로의 다른 파일을 가리키지 않도록 제거
     from . import shares
     shares.drop_shares_for(user["id"], body.space, body.path)
+    notify_change(body.space or HOME_SPACE, parent_of(body.path), user["id"],
+                  private=body.space in ("", HOME_SPACE))
     return {"ok": True}
 
 
@@ -557,6 +566,8 @@ def rename(body: RenameBody, user: dict = Depends(current_user)):
     # 이름이 바뀌면 이전 경로의 공유는 대상을 잃으므로 제거
     from . import shares
     shares.drop_shares_for(user["id"], body.space, body.path)
+    notify_change(body.space or HOME_SPACE, parent_of(body.path), user["id"],
+                  private=body.space in ("", HOME_SPACE))
     return {"ok": True}
 
 
@@ -611,7 +622,13 @@ async def move(body: MoveBody, user: dict = Depends(current_user)):
     # 이동하면 원래 경로의 공유는 대상을 잃으므로 제거
     from . import shares
     shares.drop_shares_for(user["id"], ss, body.src)
-    return {"ok": True, "path": dst.relative_to(dst_root).as_posix()}
+    # 출발 폴더(삭제 반영)와 도착 폴더(생성 반영) 양쪽에 변경을 알린다.
+    dst_rel = dst.relative_to(dst_root).as_posix()
+    notify_change(ss or HOME_SPACE, parent_of(body.src), user["id"],
+                  private=ss in ("", HOME_SPACE))
+    notify_change(ds or HOME_SPACE, parent_of(dst_rel), user["id"],
+                  private=ds in ("", HOME_SPACE))
+    return {"ok": True, "path": dst_rel}
 
 
 @router.get("/usage")

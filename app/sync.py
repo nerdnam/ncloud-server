@@ -16,6 +16,7 @@ never missed — at worst re-delivered once (harmless, the client re-checks the
 etag). etags for files up to SYNC_HASH_MAX are content hashes, so a same-size
 overwrite is still detected even on coarse-mtime filesystems.
 """
+import asyncio
 import contextlib
 import hashlib
 import os
@@ -24,8 +25,10 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from . import events
 from .auth import current_user
 from .files import (
     HOME_SPACE,
@@ -73,7 +76,7 @@ def info(user: dict = Depends(current_user)):
     return {
         "server": "gendisk",
         "api": "sync/v1",
-        "features": ["enumerate", "delta", "put", "download"],
+        "features": ["enumerate", "delta", "put", "download", "events"],
         "chunk_size": CHUNK,
         "user": user["username"],
     }
@@ -119,6 +122,38 @@ def _walk_space(base: Path, root: Path, min_mtime_ns: int = 0):
                     "etag": sync_etag(p, st),
                     "kind": file_kind(p),
                 }
+
+
+@router.get("/events")
+async def change_events(request: Request, user: dict = Depends(current_user)):
+    """파일 변경 실시간 알림(SSE).
+
+    변경 즉시 `data: {"space", "dir"}` 이벤트를 보내고, 25초마다 핑(코멘트)을
+    보내 프록시(Cloudflare 등)의 유휴 타임아웃을 피한다. 클라이언트는 이벤트를
+    받으면 해당 폴더를 재열거한다 — 주기 폴링 없는 실시간 동기화.
+    """
+    q = events.subscribe(user["id"])
+
+    async def gen():
+        try:
+            yield "retry: 3000\n\n"
+            while True:
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=25.0)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        return
+                    yield ": ping\n\n"
+                    continue
+                yield f"data: {payload}\n\n"
+        finally:
+            events.unsubscribe(q)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/enumerate")
@@ -230,6 +265,8 @@ async def put(
             raise _fs_error(exc)
 
     st = target.stat()
+    events.notify_change(space or HOME_SPACE, events.parent_of(rel),
+                         user["id"], private=is_home)
     return {
         "ok": True,
         "path": target.relative_to(root).as_posix(),

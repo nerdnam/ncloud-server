@@ -21,6 +21,7 @@ from starlette.requests import ClientDisconnect
 from starlette.responses import FileResponse, Response
 
 from .auth import verify_basic_auth
+from .events import notify_change, parent_of
 from .files import (
     HOME_SPACE,
     _fs_error,
@@ -414,6 +415,20 @@ def _proppatch(space: str, rel: str) -> Response:
 
 # ---------- 진입점 ----------
 
+def _notify_dav_change(request, user: dict, method: str, space: str, rel: str) -> None:
+    """WebDAV 변경 성공을 실시간 알림 구독자에게 전달한다(실패해도 응답에 영향 없음)."""
+    with contextlib.suppress(Exception):
+        notify_change(space or HOME_SPACE, parent_of(rel), user["id"],
+                      private=_is_home(space))
+        if method in ("MOVE", "COPY"):
+            # 도착 폴더에도 알린다 (Destination 헤더 재파싱 — 검증은 이미 끝난 뒤).
+            dest = request.headers.get("Destination", "")
+            dspace, drel = _parse(urlsplit(dest).path)
+            if dspace is not None and drel:
+                notify_change(dspace or HOME_SPACE, parent_of(drel), user["id"],
+                              private=_is_home(dspace))
+
+
 async def webdav_endpoint(request):
     method = request.method
     if method == "OPTIONS":
@@ -431,16 +446,19 @@ async def webdav_endpoint(request):
             raise HTTPException(403)
         if method == "PROPFIND":
             return _propfind(user, space, rel, request.headers.get("Depth", "1"))
-        if method == "PUT":
-            return await _put(request, user, space, rel)
-        if method == "DELETE":
-            return _delete(user, space, rel)
-        if method == "MKCOL":
-            return _mkcol(user, space, rel)
-        if method == "MOVE":
-            return await _move_or_copy(request, user, space, rel, is_move=True)
-        if method == "COPY":
-            return await _move_or_copy(request, user, space, rel, is_move=False)
+        if method in ("PUT", "DELETE", "MKCOL", "MOVE", "COPY"):
+            if method == "PUT":
+                resp = await _put(request, user, space, rel)
+            elif method == "DELETE":
+                resp = _delete(user, space, rel)
+            elif method == "MKCOL":
+                resp = _mkcol(user, space, rel)
+            else:
+                resp = await _move_or_copy(request, user, space, rel,
+                                           is_move=(method == "MOVE"))
+            if resp.status_code < 300:
+                _notify_dav_change(request, user, method, space, rel)
+            return resp
         if method == "LOCK":
             return _lock(request, space, rel)
         if method == "UNLOCK":
