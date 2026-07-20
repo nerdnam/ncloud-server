@@ -69,12 +69,19 @@ async function api(url, options = {}) {
     throw new Error("로그인이 필요합니다");
   }
   if (!res.ok) {
-    let msg = `오류 (${res.status})`;
+    let msg = "";
     try {
       const detail = (await res.json()).detail;
       if (typeof detail === "string") msg = detail;
       else if (Array.isArray(detail) && detail[0]?.msg) msg = detail[0].msg; // pydantic 422
     } catch {}
+    if (!msg) {
+      // 413 은 앱(용량 초과)이 JSON 으로 주지만, 앞단 프록시·Cloudflare 가
+      // HTML 로 돌려주면 위 파싱이 실패한다 — 그럴 때 원인을 알려준다.
+      msg = res.status === 413
+        ? "파일이 너무 큽니다 (413) — 저장소 용량 제한을 넘었거나, 서버 앞단(리버스 프록시·Cloudflare)의 업로드 크기 제한에 걸렸을 수 있어요."
+        : `오류 (${res.status})`;
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -882,6 +889,12 @@ $("tray-upload").addEventListener("click", () => {
 $("tray-clear").addEventListener("click", () => { uploadQueue.clear(); renderUploadTray(); });
 
 // items: FileList/File[] (각 File 이 webkitRelativePath 를 가질 수 있음) 또는 {file,path}[]
+// 앞단(리버스 프록시·Cloudflare)의 요청당 크기 제한/타임아웃을 넘지 않도록:
+//  - 큰 파일은 조각으로 나눠 스트리밍 업로드(청크) → 크기 사실상 무제한
+//  - 작은 파일들은 합계가 한도를 넘지 않게 묶어 multipart 로 한 번에
+const CHUNK_THRESHOLD = 48 * 1024 * 1024;   // 이보다 크면 청크 업로드
+const CHUNK_SIZE = 48 * 1024 * 1024;        // 조각 크기 (Cloudflare 100MB 여유)
+
 async function uploadFiles(items) {
   const entries = [];
   for (const it of items) {
@@ -893,20 +906,31 @@ async function uploadFiles(items) {
     alert("읽기 전용 저장소에는 업로드할 수 없습니다");
     return;
   }
-  const form = new FormData();
-  for (const { file, path } of entries) {
-    form.append("files", file, file.name);
-    form.append("paths", path);          // 상대경로(하위폴더 포함) — 서버가 구조 보존
-  }
   const status = $("upload-status");
-  const folders = new Set(
-    entries.map((e) => e.path.split("/").slice(0, -1).join("/")).filter(Boolean));
-  status.textContent = folders.size
-    ? `⬆ ${entries.length}개 파일 (폴더 ${folders.size}개) 업로드 중...`
-    : `⬆ ${entries.length}개 파일 업로드 중...`;
   status.classList.remove("hidden");
+  const total = entries.length;
+  let done = 0;
+  let batch = [], batchBytes = 0;
+  const flush = async () => {
+    if (!batch.length) return;
+    const b = batch; batch = []; batchBytes = 0;
+    await uploadMultipartBatch(b);
+    done += b.length;
+    status.textContent = `⬆ ${done}/${total} 업로드 중...`;
+  };
   try {
-    await api(fileUrl("upload", currentPath), { method: "POST", body: form });
+    for (const e of entries) {
+      const sz = e.file.size || 0;
+      if (sz > CHUNK_THRESHOLD) {
+        await flush();
+        await uploadChunked(e, status, done + 1, total);
+        done += 1;
+      } else {
+        if (batchBytes + sz > CHUNK_THRESHOLD) await flush();
+        batch.push(e); batchBytes += sz;
+      }
+    }
+    await flush();
     loadDir(currentPath);
     loadUsage();
   } catch (err) {
@@ -914,6 +938,49 @@ async function uploadFiles(items) {
   } finally {
     status.classList.add("hidden");
   }
+}
+
+/* 작은 파일 묶음을 기존 multipart 엔드포인트로 한 번에 업로드 */
+async function uploadMultipartBatch(entries) {
+  const form = new FormData();
+  for (const { file, path } of entries) {
+    form.append("files", file, file.name);
+    form.append("paths", path);          // 상대경로(하위폴더 포함) — 서버가 구조 보존
+  }
+  await api(fileUrl("upload", currentPath), { method: "POST", body: form });
+}
+
+/* 큰 파일 하나를 조각으로 나눠 이어서 업로드 (스트리밍, 실패 시 서버 오프셋으로 재개) */
+async function uploadChunked(entry, status, idx, total) {
+  const { file, path } = entry;
+  const init = await postJSON("/api/files/upload/init", {
+    space: currentSpace, path: currentPath, rel: path, size: file.size,
+  });
+  const uid = encodeURIComponent(init.upload_id);
+  const serverOffset = async () => {
+    const r = await fetch(`/api/files/upload/status?upload_id=${uid}`);
+    if (!r.ok) throw new Error(`업로드 상태 확인 실패 (HTTP ${r.status})`);
+    return (await r.json()).received;
+  };
+  let offset = 0, fails = 0;
+  while (offset < file.size) {
+    const end = Math.min(offset + CHUNK_SIZE, file.size);
+    let res = null;
+    try {
+      res = await fetch(`/api/files/upload/chunk?upload_id=${uid}&offset=${offset}`,
+        { method: "PUT", body: file.slice(offset, end) });
+    } catch (_) { /* 네트워크 오류 → 아래에서 서버와 재동기화 */ }
+    if (res && res.ok) {
+      offset = end; fails = 0;
+      status.textContent = `⬆ ${idx}/${total} · ${file.name} ${Math.round(offset / file.size * 100)}%`;
+      continue;
+    }
+    if (res && res.status === 409) { offset = await serverOffset(); continue; }  // 재동기화
+    if (++fails > 8) throw new Error(`업로드 실패 — ${file.name} (HTTP ${res ? res.status : "네트워크"})`);
+    try { offset = await serverOffset(); } catch (_) {}
+    await new Promise((r) => setTimeout(r, 500 * fails));   // 백오프 후 재시도
+  }
+  await api(`/api/files/upload/complete?upload_id=${uid}`, { method: "POST" });
 }
 
 /* 드롭된 파일/폴더 엔트리를 재귀적으로 읽어 {file, path} 목록으로 만든다 */

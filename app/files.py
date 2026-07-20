@@ -9,14 +9,17 @@ import contextlib
 import errno
 import hashlib
 import io
+import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
+import time
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
@@ -25,6 +28,10 @@ from .auth import current_user
 from .database import FILES_DIR, MOUNTS_DIR, THUMBS_DIR, get_db
 
 router = APIRouter(prefix="/api/files", tags=["files"])
+
+# 진행 중인 청크 업로드 임시 저장소 (data/uploads). data/files 와 같은 볼륨이라
+# 완료 시 os.replace 로 원자적 이동이 가능하다.
+UPLOADS_DIR = FILES_DIR.parent / "uploads"
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
@@ -315,6 +322,158 @@ async def upload(
             used += written
             saved.append(dest.relative_to(target_dir).as_posix())
     return {"saved": saved}
+
+
+# ---------- 청크(분할) 업로드 ----------
+# 큰 파일(수십 GB)을 조각으로 나눠 올려, 앞단(리버스 프록시·Cloudflare)의 요청당 크기 제한과
+# 단일 요청 타임아웃을 우회한다. 서버는 임시 .part 에 이어붙였다가 완료 시 원자적으로 옮긴다.
+
+class UploadInit(BaseModel):
+    space: str = HOME_SPACE
+    path: str = ""
+    rel: str = ""            # 하위폴더 포함 상대경로 또는 파일명 (폴더 구조 보존)
+    size: int = 0            # 총 크기(선택, 표시용)
+    overwrite: bool = False  # True면 같은 경로를 원자적으로 덮어쓴다(카메라 백업 등 멱등 재시도용)
+
+
+def _session_files(upload_id: str) -> tuple[Path, Path]:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", upload_id)[:64]
+    if not safe:
+        raise HTTPException(400, "잘못된 업로드 ID")
+    return UPLOADS_DIR / f"{safe}.part", UPLOADS_DIR / f"{safe}.json"
+
+
+def _load_session(upload_id: str, user: dict) -> tuple[dict, Path, Path]:
+    part, meta_p = _session_files(upload_id)
+    if not meta_p.exists() or not part.exists():
+        raise HTTPException(404, "업로드 세션을 찾을 수 없습니다")
+    try:
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HTTPException(404, "업로드 세션을 찾을 수 없습니다")
+    if meta.get("user_id") != user["id"]:
+        raise HTTPException(403, "권한이 없습니다")
+    return meta, part, meta_p
+
+
+def _cleanup_sessions(max_age_h: int = 24) -> None:
+    try:
+        cutoff = time.time() - max_age_h * 3600
+        for f in UPLOADS_DIR.glob("*"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+@router.post("/upload/init")
+def upload_init(body: UploadInit, user: dict = Depends(current_user)):
+    """청크 업로드 세션 시작 → upload_id 발급."""
+    space = body.space or HOME_SPACE
+    root = space_root(user, space)               # 접근 검증
+    target_dir = safe_path(user, body.path, space)
+    if not target_dir.is_dir():
+        raise HTTPException(404, "폴더를 찾을 수 없습니다")
+    if space not in ("", HOME_SPACE) and not _writable(root):
+        raise HTTPException(403, "읽기 전용 저장소입니다")
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    _cleanup_sessions()
+    upload_id = secrets.token_urlsafe(24)
+    part, meta_p = _session_files(upload_id)
+    part.touch()
+    meta_p.write_text(json.dumps({
+        "user_id": user["id"], "space": space, "path": body.path,
+        "rel": body.rel, "size": int(body.size or 0),
+        "overwrite": bool(body.overwrite),
+    }), encoding="utf-8")
+    return {"upload_id": upload_id}
+
+
+@router.get("/upload/status")
+def upload_status(upload_id: str, user: dict = Depends(current_user)):
+    """지금까지 서버가 받은 바이트 수 (재개용)."""
+    _, part, _ = _load_session(upload_id, user)
+    return {"received": part.stat().st_size}
+
+
+@router.put("/upload/chunk")
+async def upload_chunk(request: Request, upload_id: str, offset: int = 0,
+                       user: dict = Depends(current_user)):
+    """조각을 이어붙인다. offset 은 현재 받은 크기와 같아야 한다(불일치 409 → 재동기화)."""
+    _, part, _ = _load_session(upload_id, user)
+    cur = part.stat().st_size
+    if offset != cur:
+        raise HTTPException(409, f"offset 불일치 (현재 {cur})")
+    try:
+        with part.open("ab") as out:
+            async for chunk in request.stream():
+                out.write(chunk)
+    except OSError as exc:
+        _truncate_part(part, cur)
+        raise _fs_error(exc)
+    except BaseException:
+        # 스트림 중단(모바일 연결 끊김 등)·취소로 조각을 끝까지 못 받으면 되돌린다.
+        _truncate_part(part, cur)
+        raise
+    return {"received": part.stat().st_size}
+
+
+def _truncate_part(part: Path, size: int) -> None:
+    """조각 파일을 마지막으로 온전했던 지점(size)으로 되돌린다. 부분 바이트가 남으면
+    클라이언트가 offset==현재크기 로 재동기화할 수 없어 업로드가 막히므로, 실패 시 항상 호출."""
+    try:
+        with part.open("r+b") as f:
+            f.truncate(size)
+    except OSError:
+        pass
+
+
+@router.post("/upload/complete")
+def upload_complete(upload_id: str, user: dict = Depends(current_user)):
+    """마무리: 용량 검사 후 대상 위치로 원자적 이동(이름 겹치면 (1) 회피)."""
+    meta, part, meta_p = _load_session(upload_id, user)
+    space, path, rel = meta["space"], meta["path"], meta.get("rel", "")
+    parts = [p for p in rel.replace("\\", "/").split("/") if p and p not in (".", "..")]
+    if not parts:
+        part.unlink(missing_ok=True); meta_p.unlink(missing_ok=True)
+        raise HTTPException(400, "파일 이름이 없습니다")
+    name = parts[-1]
+    subdir = "/".join(parts[:-1])
+    root = space_root(user, space)
+    if space not in ("", HOME_SPACE) and not _writable(root):
+        part.unlink(missing_ok=True); meta_p.unlink(missing_ok=True)
+        raise HTTPException(403, "읽기 전용 저장소입니다")
+    target_dir = safe_path(user, f"{path}/{subdir}" if subdir else path, space)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        part.unlink(missing_ok=True); meta_p.unlink(missing_ok=True)
+        raise _fs_error(exc)
+    is_home = space in ("", HOME_SPACE)
+    quota = user_quota(user["id"]) if is_home else 0
+    if quota > 0:
+        used = dir_size(user_root(user))
+        if used + part.stat().st_size > quota:
+            part.unlink(missing_ok=True); meta_p.unlink(missing_ok=True)
+            raise HTTPException(413, f"용량 제한({_fmt_size(quota)})을 초과했습니다.")
+    dest = target_dir / name
+    if not meta.get("overwrite"):
+        # 기본: 이름이 겹치면 " (1)"로 회피(절대 덮어쓰지 않음). overwrite=True면 이 회피를
+        # 건너뛰어 os.replace 가 같은 경로를 원자적으로 덮어쓴다(카메라 백업의 멱등 재시도).
+        counter = 1
+        while dest.exists():
+            dest = target_dir / f"{Path(name).stem} ({counter}){Path(name).suffix}"
+            counter += 1
+    try:
+        os.replace(part, dest)      # data/uploads → data/files: 같은 볼륨, 원자적 이동
+    except OSError as exc:
+        part.unlink(missing_ok=True); meta_p.unlink(missing_ok=True)
+        raise _fs_error(exc)
+    meta_p.unlink(missing_ok=True)
+    return {"saved": dest.relative_to(root).as_posix()}
 
 
 def _fmt_size(n: int) -> str:
