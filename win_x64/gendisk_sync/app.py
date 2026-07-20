@@ -528,6 +528,27 @@ class App:
         self.var_vfs = tk.BooleanVar(value=self.cfg.vfs_enabled)
         ctk.CTkSwitch(c, text="genDISK Drive 연결", variable=self.var_vfs,
                       command=self._toggle_vfs).pack(anchor="w", pady=(8, 0))
+        # 드라이브는 기본이 SMB식(폴더를 열 때마다 서버 최신 목록). 이 스위치는
+        # 백그라운드 자동 반영(실시간 SSE + 주기 대조)을 추가로 켤지에 대한 사용자 선택.
+        self.var_drive_sync = tk.BooleanVar(value=getattr(self.cfg, "vfs_sync", True))
+        ctk.CTkSwitch(c, text="원격 변경 자동 반영 (백그라운드 동기화)",
+                      variable=self.var_drive_sync,
+                      command=self._toggle_drive_sync).pack(anchor="w", pady=(8, 0))
+        self._field_label(
+            c, "끄면 SMB처럼 폴더를 열 때만 서버 목록을 가져옵니다.\n"
+               "켜면 폰/웹에서 바꾼 내용이 열어 둔 폴더에도 실시간 반영됩니다.").pack(
+            fill="x", pady=(2, 0))
+        vrow = ctk.CTkFrame(c, fg_color="transparent")
+        vrow.pack(fill="x", pady=(8, 0))
+        self.btn_drive_refresh = ctk.CTkButton(
+            vrow, text="지금 새로고침", width=120, command=self._drive_refresh_now,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER)
+        self.btn_drive_refresh.pack(side="left")
+        self.btn_drive_reconnect = ctk.CTkButton(
+            vrow, text="다시 연결", width=110, command=self._drive_reconnect,
+            fg_color="transparent", border_width=1,
+            text_color=ACCENT, hover_color=("gray90", "gray25"))
+        self.btn_drive_reconnect.pack(side="left", padx=(8, 0))
 
         # ── 상태 & 로그 ──
         c = self._card(right, "상태")
@@ -800,6 +821,95 @@ class App:
                 self.log(f"genDISK Drive 연결 실패: {e}")
                 self.set_status("genDISK Drive 연결 실패", DANGER)
                 self.root.after(0, lambda: self.var_vfs.set(False))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_drive_buttons(self, busy: bool, refresh_text="지금 새로고침",
+                           reconnect_text="다시 연결"):
+        """드라이브 카드의 두 버튼을 함께 잠금/해제한다(동시 실행으로 상태가 엉키지 않게)."""
+        state = "disabled" if busy else "normal"
+        def apply():
+            try:
+                self.btn_drive_refresh.configure(state=state, text=refresh_text)
+                self.btn_drive_reconnect.configure(state=state, text=reconnect_text)
+            except Exception:  # noqa: BLE001 (창 종료 중이면 무시)
+                pass
+        self.root.after(0, apply)
+
+    def _drive_refresh_now(self):
+        """서버와 전체 재대조해 드라이브 목록을 지금 최신화한다(깊은 폴더 포함)."""
+        if not self.drive.running:
+            messagebox.showwarning("드라이브 필요", "genDISK Drive 를 먼저 연결하세요.")
+            return
+        self._set_drive_buttons(True, refresh_text="새로고침 중…")
+
+        def work():
+            try:
+                self.set_status("드라이브 새로고침 중…", MUTED)
+                n = self.drive.refresh_now()
+                if n is None:                      # 그 사이 드라이브가 내려감(재연결 중 등)
+                    self.set_status("드라이브가 연결돼 있지 않습니다", DANGER)
+                    self.log("드라이브 새로고침: 드라이브가 연결돼 있지 않습니다.")
+                else:
+                    self.set_status("genDISK Drive 연결됨", SUCCESS)
+                    self.log(f"드라이브 새로고침 완료 (신규 {n}개 반영)")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"드라이브 새로고침 실패: {e}")
+                self.set_status("드라이브 새로고침 실패", DANGER)
+            finally:
+                self._set_drive_buttons(False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _toggle_drive_sync(self):
+        """백그라운드 자동 반영 켬/끔 — 저장하고, 드라이브가 켜져 있으면 재연결로 적용한다.
+        (SSE 구독 스레드를 시작/중지해야 해서 재연결이 가장 깔끔하다)"""
+        self.cfg.vfs_sync = self.var_drive_sync.get()
+        self.cfg.save()
+        mode = "자동 반영 켬" if self.cfg.vfs_sync else "SMB식 (자동 반영 끔)"
+        if not self.drive.running:
+            self.log(f"드라이브 동기화 설정 저장: {mode} (다음 연결부터 적용)")
+            return
+        self._set_drive_buttons(True, reconnect_text="적용 중…")
+
+        def work():
+            try:
+                self.drive.restart()
+                self.log(f"드라이브 동기화 설정 적용: {mode}")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"동기화 설정 적용 실패: {e}")
+                self.set_status("genDISK Drive 연결 실패", DANGER)
+                self.cfg.vfs_enabled = False
+                self.cfg.save()
+                self.root.after(0, lambda: self.var_vfs.set(False))
+            finally:
+                self._set_drive_buttons(False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _drive_reconnect(self):
+        """genDISK Drive 를 완전히 내렸다 다시 연결한다(연결·목록 문제 수동 복구).
+        탐색기 노드는 유지되고 provider 연결·폴링·실시간 이벤트만 새로 만든다."""
+        if not (self.cfg.server_url and self.cfg.token):
+            messagebox.showwarning("로그인 필요", "먼저 로그인하세요.")
+            return
+        self._set_drive_buttons(True, reconnect_text="연결 중…")
+
+        def work():
+            try:
+                self.set_status("genDISK Drive 다시 연결 중…", MUTED)
+                self.drive.restart()
+                self.cfg.vfs_enabled = True
+                self.cfg.save()
+                self.root.after(0, lambda: self.var_vfs.set(True))
+                self.set_status("genDISK Drive 연결됨", SUCCESS)
+                self.log("genDISK Drive 를 다시 연결했습니다.")
+            except Exception as e:  # noqa: BLE001
+                # stop 은 이미 됐는데 start 가 실패한 상태 — 토글/설정을 실제 상태(꺼짐)로 되돌린다.
+                self.log(f"genDISK Drive 다시 연결 실패: {e}")
+                self.set_status("genDISK Drive 연결 실패", DANGER)
+                self.cfg.vfs_enabled = False
+                self.cfg.save()
+                self.root.after(0, lambda: self.var_vfs.set(False))
+            finally:
+                self._set_drive_buttons(False)
         threading.Thread(target=work, daemon=True).start()
 
     def _toggle_vfs(self):

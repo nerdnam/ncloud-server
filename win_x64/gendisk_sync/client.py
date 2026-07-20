@@ -377,6 +377,17 @@ class GenDiskClient:
         return self._json("GET", "/api/sync/enumerate",
                           params={"space": space, "path": path})
 
+    def sync_info(self) -> dict:
+        """서버 동기화 기능 정보: {features:[...], ...}. delta/events 지원 여부 판별용."""
+        return self._json("GET", "/api/sync/info")
+
+    def sync_delta(self, space: str, cursor: str) -> dict:
+        """커서(서버 시각 ns) 이후 생성·수정된 항목만 받는다: {cursor, changed:[{path,...}]}.
+        주의: cursor="0" 은 서버가 전체 파일을 해시하는 풀워크라 매우 비싸다 — 쓰지 말 것.
+        삭제는 포함되지 않는다(폴더 대조로 확인)."""
+        return self._json("GET", "/api/sync/delta",
+                          params={"space": space, "cursor": cursor})
+
     def download(self, space: str, path: str) -> bytes:
         _s, _h, raw = self._request("GET", "/api/files/download",
                                     params={"space": space, "path": path}, gzip_ok=False)

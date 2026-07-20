@@ -40,7 +40,7 @@ def set_expose_placeholders():
 class Provider:
     def __init__(self, root: str, provider_guid: str, fetch_range, list_dir=None,
                  list_spaces=None, upload=None, delete=None, rename=None, mkdir=None,
-                 notify=None, progress=None,
+                 notify=None, progress=None, state_path=None, always_fresh=True,
                  space: str = "home", provider_name: str = "genDISK",
                  identity: bytes = b"genDISK", log=print):
         self.root = os.path.abspath(root)
@@ -58,12 +58,22 @@ class Provider:
         self.progress = progress            # (key,name,dir,done,total) -> None (다운로드 진행)
         self.space = space
         self.log = log
+        # SMB식 동작: 폴더를 '채움 완료(고정)'로 표시하지 않아 열 때마다 서버 목록을
+        # 다시 조회한다 → 탐색기가 항상 서버의 현재 상태를 보여준다(네트워크 드라이브처럼).
+        self.always_fresh = bool(always_fresh)
         self._space_map = {}                # 폴더이름 -> space id (다중 저장소)
         # 원격 변경 반영(refresh)용: 지금까지 실제로 열려 채워진 폴더들의 rel 경로.
         # refresh 는 이 폴더들만 서버와 대조해 새 항목을 추가한다(온디맨드 유지 + 작업량 최소).
+        # Windows 는 한 번 채워진(고정된) 폴더에 FETCH_PLACEHOLDERS 를 다시 보내지 않으므로,
+        # 이 집합을 디스크(state_path)에 영속화해 앱 재시작 후에도 깊은 폴더가
+        # 폴링(갱신·삭제 반영)과 upload_scan(드롭 감지) 대상에 남게 한다.
         self._populated_dirs = set()
+        self._state_path = state_path
+        self._state_lock = threading.Lock()
+        self._load_state()
         self._ph_lock = threading.Lock()    # CfCreatePlaceholders 동시호출 직렬화
         self._reconcile_lock = threading.Lock()  # 폴더 대조(refresh/refresh_dir) 직렬화 — 폴링·SSE 경쟁 방지
+        self._refresh_err = False           # 직전 _refresh_one 의 목록 조회 실패 여부(연속 실패 중단용)
         self._hydrate_pool = None           # 병렬 다운로드 워커 풀(지연 생성)
         self._upload_seen = {}              # frel -> (size, mtime_ns): 안정성 대기 추적
         self._upload_done = {}              # frel -> (size, mtime_ns): 이미 업로드한 버전(재업로드 방지)
@@ -79,6 +89,77 @@ class Provider:
         self._cb_rename = None
         self._cb_table = None
         self._reg_idbuf = None
+
+    # ------------------------------------------------------- populated 상태 영속화
+    MAX_TRACKED_DIRS = 500      # 폴링 대상 상한 — 폴더당 목록 요청 1회이므로 무한 성장 방지
+
+    def _load_state(self):
+        """저장된 '채워진 폴더' 목록을 복원한다(로컬에 아직 존재하는 폴더만). best-effort.
+        상태 파일이 아직 없으면(업데이트 직후 첫 실행) 로컬에 이미 만들어진 폴더들을
+        걸어 한 번 시딩한다 — 이 업데이트 이전 세션에서 열려 '고정'된 폴더는
+        FETCH_PLACEHOLDERS 가 다시 안 오므로, 이 마이그레이션이 없으면 영영 잊힌다.
+        (provider 연결 전의 로컬 걷기라 네트워크·온디맨드 채우기를 유발하지 않는다.)"""
+        if not self._state_path:
+            return
+        try:
+            with open(self._state_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:  # noqa: BLE001  (없거나 손상 — 로컬 걷기로 시딩)
+            self._seed_from_disk()
+            return
+        try:
+            if data.get("root") != self.root:
+                self._seed_from_disk()       # 다른 싱크루트의 상태 — 이 루트 기준으로 다시 시딩
+                return
+            for rel in data.get("populated_dirs", [])[:self.MAX_TRACKED_DIRS]:
+                local = self.root if rel == "" else os.path.join(
+                    self.root, rel.replace("/", os.sep))
+                if os.path.isdir(local):
+                    self._populated_dirs.add(rel)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _seed_from_disk(self):
+        """로컬에 존재하는 폴더 트리를 걸어 populated 집합을 시딩한다(마이그레이션·복구용)."""
+        try:
+            if not os.path.isdir(self.root):
+                return
+            self._populated_dirs.add("")
+            for dirpath, dirnames, _files in os.walk(self.root):
+                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                for d in dirnames:
+                    rel = os.path.relpath(os.path.join(dirpath, d),
+                                          self.root).replace(os.sep, "/")
+                    self._populated_dirs.add(rel)
+                    if len(self._populated_dirs) >= self.MAX_TRACKED_DIRS:
+                        break
+                if len(self._populated_dirs) >= self.MAX_TRACKED_DIRS:
+                    break
+            self._save_state()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _save_state(self):
+        """'채워진 폴더' 목록을 원자적으로 저장한다. best-effort(실패해도 동작에는 지장 없음)."""
+        if not self._state_path:
+            return
+        try:
+            with self._state_lock:           # 스냅샷도 락 안에서 — 동시 저장 간 최신본 보장
+                dirs = sorted(list(self._populated_dirs))[:self.MAX_TRACKED_DIRS]
+                os.makedirs(os.path.dirname(self._state_path), exist_ok=True)
+                tmp = self._state_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump({"root": self.root, "populated_dirs": dirs},
+                              f, ensure_ascii=False)
+                os.replace(tmp, self._state_path)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _track_populated(self, rel: str):
+        """폴더가 채워졌음을 기록(+영속화). 이미 알던 폴더면 저장 생략."""
+        if rel not in self._populated_dirs:
+            self._populated_dirs.add(rel)
+            self._save_state()
 
     # ------------------------------------------------------------------ 등록
     def register(self):
@@ -204,7 +285,7 @@ class Provider:
     def populate_root(self):
         """드라이브 루트를 플레이스홀더로 심는다(다중 저장소면 저장소 폴더들, 아니면 최상위 파일)."""
         entries = self._children_for("")
-        self._populated_dirs.add("")
+        self._track_populated("")
         existing = set(os.listdir(self.root)) if os.path.isdir(self.root) else set()
         fresh = [e for e in entries if e["name"] not in existing]
         if not fresh:
@@ -213,21 +294,23 @@ class Provider:
         n = self._create_placeholders_in(self.root, fresh)
         self.log(f"[vfs] populate_root: seeded {n}/{len(fresh)}")
 
-    def refresh(self) -> int:
+    def refresh(self, deep: bool = True) -> int:
         """서버와 다시 대조해 다른 기기(폰/웹)가 올린 새 파일을 placeholder 로 추가한다
         → 드라이브에 나타난다. 이미 열려서 DISABLE_ON_DEMAND_POPULATION 로 '고정'된 폴더도
         CfCreatePlaceholders 로 새 항목을 넣을 수 있으므로, 고정된 폴더의 갱신도 이걸로 해결한다.
 
         대상: (1) 루트, (2) 최상위 저장소 폴더(내 파일=home 등) — 비어 있어도 항상,
-        (3) 이번 세션에 연 폴더들(_populated_dirs). (2)가 핵심: 홈이 한 번 열려 고정된 뒤
-        새 파일이 안 뜨던 문제를 잡는다.
+        (3) deep=True 면 열었던 폴더들(_populated_dirs, 영속화됨). (2)가 핵심: 홈이 한 번
+        열려 고정된 뒤 새 파일이 안 뜨던 문제를 잡는다.
 
         주기 폴링용(폴백). 실시간 반영은 refresh_dir()(SSE 이벤트 기반)가 담당한다.
+        deep=False 면 루트+저장소 폴더만(가벼운 주기용), deep=True 면 열었던 폴더 전부
+        (폴더당 목록 요청 1회라 무겁다 — 주기적으로 가끔 + 수동 새로고침에서만).
+        연속 3회 목록 조회가 실패하면(서버 접속 불가) 남은 폴더를 포기해 오래 매달리지 않는다.
         안전 원칙: '추가'와 '우리 in-sync 항목의 서버측 삭제 반영'만 한다(사용자 로컬 변경 불가침)."""
         if self.list_dir is None:
             return 0
-        targets = set(self._populated_dirs)
-        targets.add("")
+        targets = {""}
         if self.list_spaces is not None:            # 다중 저장소: 저장소 폴더는 늘 새로고침
             if not self._space_map:
                 try:
@@ -235,9 +318,20 @@ class Provider:
                 except Exception:  # noqa: BLE001
                     pass
             targets.update(self._space_map.keys())
+        if deep:
+            targets.update(self._populated_dirs)
         added = 0
-        for rel in list(targets):
+        consecutive_err = 0
+        for rel in sorted(targets):                 # 얕은 폴더 먼저(부모부터 반영)
+            self._refresh_err = False
             added += self._refresh_one(rel)
+            if self._refresh_err:
+                consecutive_err += 1
+                if consecutive_err >= 3:            # 서버 연결 불가로 보임 — 남은 대상 포기
+                    self.log("[vfs] refresh: 연속 실패 3회 — 이번 사이클 중단")
+                    break
+            else:
+                consecutive_err = 0
         if added:
             self.log(f"[vfs] refresh: +{added} new placeholder(s) total")
         return added
@@ -318,6 +412,7 @@ class Provider:
             # 다른 폴더의 실시간(SSE) 반영까지 그 뒤로 직렬화되기 때문.
             entries = self._children_for(rel)
         except Exception as e:  # noqa: BLE001
+            self._refresh_err = True         # refresh() 의 연속 실패 중단 판단용
             self.log(f"[vfs] refresh '{rel}' skip: {e!r}")
             return 0
         with self._reconcile_lock:
@@ -334,30 +429,35 @@ class Provider:
                     self.log(f"[vfs] refresh '{rel or '/'}': +{added}")
                 except OSError as e:
                     self.log(f"[vfs] refresh create '{rel}': {e!r}")
-            # 서버에서 사라진 것 = 삭제됨 → 로컬 placeholder 도 제거(우리 것만, 재귀 검사).
-            # 로컬 제거가 다시 서버 삭제로 전파되지 않게 _suppress_delete 로 막는다(오탐 데이터 손실 방지).
-            server_names = {e["name"] for e in entries}
-            for lname in existing:
-                if (lname in server_names or lname.lower() == "desktop.ini"
-                        or lname.startswith(".")):
-                    continue
-                child = os.path.join(local, lname)
-                if not self._safe_to_remove(child):
-                    continue                 # 사용자 신규/수정/드롭 파일(포함한 폴더)은 절대 안 건드림
-                crel = lname if rel == "" else rel + "/" + lname
-                self._suppress_delete.add(crel)
-                try:
-                    if os.path.isdir(child):
-                        import shutil
-                        shutil.rmtree(child, ignore_errors=True)
-                    else:
-                        os.remove(child)
-                    self._populated_dirs.discard(crel)
-                    self.log(f"[vfs] removed (server-deleted): {crel}")
-                except OSError as e:  # noqa: BLE001
-                    self._suppress_delete.discard(crel)
-                    self.log(f"[vfs] remove '{crel}': {e!r}")
+            self._reconcile_deletions_locked(rel, local, entries, existing)
             return added
+
+    def _reconcile_deletions_locked(self, rel, local, entries, existing):
+        """서버 목록(entries)에 없는 로컬 항목 중 '우리 것'(재귀 안전 검사 통과)만 제거한다.
+        _reconcile_lock 을 보유한 상태에서 호출할 것. 로컬 제거가 다시 서버 삭제로
+        전파되지 않게 _suppress_delete 로 막는다(오탐 데이터 손실 방지)."""
+        server_names = {e["name"] for e in entries}
+        for lname in existing:
+            if (lname in server_names or lname.lower() == "desktop.ini"
+                    or lname.startswith(".")):
+                continue
+            child = os.path.join(local, lname)
+            if not self._safe_to_remove(child):
+                continue                 # 사용자 신규/수정/드롭 파일(포함한 폴더)은 절대 안 건드림
+            crel = lname if rel == "" else rel + "/" + lname
+            self._suppress_delete.add(crel)
+            try:
+                if os.path.isdir(child):
+                    import shutil
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    os.remove(child)
+                self._populated_dirs.discard(crel)
+                self._save_state()
+                self.log(f"[vfs] removed (server-deleted): {crel}")
+            except OSError as e:  # noqa: BLE001
+                self._suppress_delete.discard(crel)
+                self.log(f"[vfs] remove '{crel}': {e!r}")
 
     # ---------------------------------------------------------------- 로컬→원격 업로드
     def _upload_target(self, frel: str):
@@ -448,7 +548,7 @@ class Provider:
                             self._mark_uploaded(
                                 de.path, {"space": tgt[0], "path": tgt[1], "dir": True})
                             self._upload_done[frel] = "dir"
-                            self._populated_dirs.add(frel)   # 하위 파일도 다음 스캔에 포함
+                            self._track_populated(frel)      # 하위 파일도 다음 스캔에 포함
                             self.log(f"[vfs] mkdir on server: {tgt[0]}:{tgt[1]}")
                         except Exception as e:  # noqa: BLE001
                             self.log(f"[vfs] mkdir '{frel}': {e!r}")
@@ -824,15 +924,28 @@ class Provider:
         return arr, keep
 
     def _on_fetch_placeholders(self, info_p, params_p):
-        """폴더를 열면 서버에서 자식 목록을 받아 플레이스홀더로 채운다(온디맨드)."""
+        """폴더를 열면 서버에서 자식 목록을 받아 플레이스홀더로 채운다.
+
+        SMB식(always_fresh): '채움 완료(DISABLE_ON_DEMAND_POPULATION)' 표시를 하지 않아
+        다음에 열 때도 이 콜백이 다시 온다 → 폴더를 열 때마다 항상 서버의 현재 목록.
+        이미 로컬에 있는 항목은 빼고 전송하고(재조회 시 중복 생성 방지), 전송 후에는
+        서버에서 사라진 항목을 정리한다(안전 검사 통과분만) — 삭제까지 즉시 반영."""
         info = None
         try:
             info = info_p[0]
             rel = self._rel_from_normalized(info.NormalizedPath)
-            self._populated_dirs.add(rel)   # refresh(원격 변경 반영) 대상에 포함
+            self._track_populated(rel)      # upload_scan·deep refresh 대상에 포함(+영속화)
+            local = self.root if rel == "" else os.path.join(
+                self.root, rel.replace("/", os.sep))
             entries = self._children_for(rel)
-            self.log(f"[vfs] FETCH_PLACEHOLDERS dir='{rel}' -> {len(entries)} entries")
-            arr, keep = self._build_placeholders(entries)  # noqa: F841 (keep alive)
+            try:
+                existing = set(os.listdir(local))
+            except OSError:
+                existing = set()
+            fresh = [e for e in entries if e["name"] not in existing]
+            self.log(f"[vfs] FETCH_PLACEHOLDERS dir='{rel}' -> "
+                     f"{len(entries)} entries (+{len(fresh)} new)")
+            arr, keep = self._build_placeholders(fresh)  # noqa: F841 (keep alive)
             op = C.CF_OPERATION_INFO()
             op.StructSize = ctypes.sizeof(C.CF_OPERATION_INFO)
             op.Type = C.CF_OPERATION_TYPE_TRANSFER_PLACEHOLDERS
@@ -840,14 +953,25 @@ class Provider:
             op.TransferKey = info.TransferKey
             p = C.TRANSFER_PLACEHOLDERS_PARAMS()
             p.ParamSize = ctypes.sizeof(C.TRANSFER_PLACEHOLDERS_PARAMS)
-            p.Flags = C.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION
-            p.PlaceholderTotalCount = len(entries)
-            p.PlaceholderArray = ctypes.cast(arr, C.LPVOID) if entries else None
-            p.PlaceholderCount = len(entries)
+            p.Flags = (C.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE
+                       if self.always_fresh else
+                       C.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION)
+            p.PlaceholderTotalCount = len(fresh)
+            p.PlaceholderArray = ctypes.cast(arr, C.LPVOID) if fresh else None
+            p.PlaceholderCount = len(fresh)
             p.EntriesProcessed = 0
             hr = C.CfExecute(byref(op), ctypes.cast(byref(p), C.LPCVOID))
             if not C.hr_ok(hr):
                 self.log(f"[vfs] TRANSFER_PLACEHOLDERS -> {C.hr_str(hr)}")
+            # 전송(탐색기 응답)을 먼저 끝낸 뒤 서버에서 사라진 항목을 정리 — SMB처럼
+            # 삭제도 열 때 바로 반영된다. (백그라운드 reconcile 과는 락으로 직렬화)
+            if self.always_fresh:
+                with self._reconcile_lock:
+                    try:
+                        existing2 = set(os.listdir(local))
+                    except OSError:
+                        existing2 = set()
+                    self._reconcile_deletions_locked(rel, local, entries, existing2)
         except Exception as e:  # noqa: BLE001
             self.log(f"[vfs] FETCH_PLACEHOLDERS error: {e!r}")
             if info is not None:
@@ -859,7 +983,11 @@ class Provider:
                     op.TransferKey = info.TransferKey
                     p = C.TRANSFER_PLACEHOLDERS_PARAMS()
                     p.ParamSize = ctypes.sizeof(C.TRANSFER_PLACEHOLDERS_PARAMS)
-                    p.Flags = C.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION
+                    # 실패해도 '채움 완료'로 고정하지 않는다(always_fresh) — 서버가 복구되면
+                    # 다음 열기에서 다시 시도된다(SMB 가 끊겼다 붙는 것과 동일).
+                    p.Flags = (C.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE
+                               if self.always_fresh else
+                               C.CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION)
                     p.EntriesProcessed = 0
                     C.CfExecute(byref(op), ctypes.cast(byref(p), C.LPCVOID))
                 except Exception:
